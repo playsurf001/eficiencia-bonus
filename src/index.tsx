@@ -1,13 +1,51 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { setCookie, deleteCookie } from 'hono/cookie'
 import { renderer } from './renderer'
 import type { Bindings, MetasConfig } from './types'
 import { consolidarEstatisticas, rangeDoMes, type StatsRaw } from './business'
+import {
+  createToken, verifyToken, hashPassword, verifyPassword,
+  getJwtSecret, getTokenFromRequest, type JwtPayload,
+} from './auth'
+import { importXLSX } from './xlsx-import'
 
-const app = new Hono<{ Bindings: Bindings }>()
+type Variables = { user: JwtPayload }
+const app = new Hono<{ Bindings: Bindings & { JWT_SECRET?: string }; Variables: Variables }>()
 
-app.use('/api/*', cors())
+app.use('/api/*', cors({ origin: '*', credentials: true }))
 app.use(renderer)
+
+/* =============================================================
+ *  MIDDLEWARE DE AUTENTICAÇÃO
+ * ============================================================= */
+async function authMiddleware(c: any, next: any) {
+  const token = getTokenFromRequest(c)
+  if (!token) return c.json({ error: 'Não autenticado' }, 401)
+  const secret = getJwtSecret(c.env)
+  const payload = await verifyToken(token, secret)
+  if (!payload) return c.json({ error: 'Token inválido ou expirado' }, 401)
+  // Verifica se a sessão não foi revogada
+  const row = await c.env.DB.prepare('SELECT revoked FROM sessoes WHERE jti = ?').bind(payload.jti).first<any>()
+  if (row && row.revoked) return c.json({ error: 'Sessão revogada' }, 401)
+  c.set('user', payload)
+  await next()
+}
+
+function requireRole(...roles: string[]) {
+  return async (c: any, next: any) => {
+    const u: JwtPayload = c.get('user')
+    if (!u || !roles.includes(u.role)) return c.json({ error: 'Sem permissão' }, 403)
+    await next()
+  }
+}
+
+// Helper para pegar empresa_id do usuário autenticado ou fallback (público demo)
+async function getEmpresaId(c: any): Promise<number> {
+  const u: JwtPayload | undefined = c.get('user')
+  if (u) return u.empresa_id
+  return 1 // demo público
+}
 
 /* =============================================================
  *  HELPERS
@@ -17,37 +55,148 @@ async function getConfig(DB: D1Database, empresa_id = 1): Promise<MetasConfig> {
     .bind(empresa_id)
     .first<MetasConfig>()
   if (cfg) return cfg
-  // fallback defaults (se banco vazio)
   return {
-    id: 0,
-    empresa_id,
-    eficiencia_minima: 70,
-    eficiencia_meta: 85,
-    eficiencia_excelente: 100,
-    bonus_faixa_1: 100,
-    bonus_faixa_2: 250,
-    bonus_faixa_3: 400,
-    bonus_faixa_4: 600,
-    frequencia_minima: 90,
-    retrabalho_limite: 5,
-    dias_uteis_mes: 22,
-    minutos_dia_util: 480,
+    id: 0, empresa_id,
+    eficiencia_minima: 70, eficiencia_meta: 85, eficiencia_excelente: 100,
+    bonus_faixa_1: 100, bonus_faixa_2: 250, bonus_faixa_3: 400, bonus_faixa_4: 600,
+    frequencia_minima: 90, retrabalho_limite: 5, dias_uteis_mes: 22, minutos_dia_util: 480,
   }
 }
 
 /* =============================================================
- *  API — HEALTH / META
+ *  API — AUTH
  * ============================================================= */
-app.get('/api/health', (c) => c.json({ ok: true, ts: Date.now() }))
+app.post('/api/auth/login', async (c) => {
+  const body = await c.req.json<{ email: string; senha: string }>()
+  if (!body.email || !body.senha) return c.json({ error: 'E-mail e senha obrigatórios' }, 400)
+  const user = await c.env.DB.prepare(
+    'SELECT u.*, e.nome as empresa_nome FROM usuarios u JOIN empresas e ON e.id = u.empresa_id WHERE u.email = ? AND u.ativo = 1'
+  ).bind(body.email.toLowerCase().trim()).first<any>()
+  if (!user) return c.json({ error: 'Credenciais inválidas' }, 401)
+  const ok = await verifyPassword(body.senha, user.senha_hash)
+  if (!ok) return c.json({ error: 'Credenciais inválidas' }, 401)
+
+  const secret = getJwtSecret(c.env)
+  const { token, jti, exp } = await createToken(
+    { sub: user.id, email: user.email, nome: user.nome, empresa_id: user.empresa_id, role: user.role },
+    secret
+  )
+  // Registrar sessão
+  await c.env.DB.prepare(
+    'INSERT INTO sessoes (usuario_id, jti, expires_at) VALUES (?, ?, ?)'
+  ).bind(user.id, jti, new Date(exp * 1000).toISOString()).run()
+  await c.env.DB.prepare('UPDATE usuarios SET ultimo_login = CURRENT_TIMESTAMP WHERE id = ?').bind(user.id).run()
+
+  // Cookie + body
+  setCookie(c, 'cs_token', token, {
+    httpOnly: true, secure: true, sameSite: 'Lax',
+    path: '/', maxAge: 60 * 60 * 24 * 7,
+  })
+  return c.json({
+    token,
+    user: {
+      id: user.id, email: user.email, nome: user.nome, role: user.role,
+      empresa_id: user.empresa_id, empresa_nome: user.empresa_nome,
+    },
+  })
+})
+
+app.post('/api/auth/register', async (c) => {
+  const body = await c.req.json<{ email: string; senha: string; nome: string; empresa_nome?: string }>()
+  if (!body.email || !body.senha || !body.nome)
+    return c.json({ error: 'Campos obrigatórios: email, senha, nome' }, 400)
+  if (body.senha.length < 6) return c.json({ error: 'Senha deve ter pelo menos 6 caracteres' }, 400)
+
+  const email = body.email.toLowerCase().trim()
+  const existente = await c.env.DB.prepare('SELECT id FROM usuarios WHERE email = ?').bind(email).first()
+  if (existente) return c.json({ error: 'E-mail já cadastrado' }, 400)
+
+  // Criar nova empresa OU entrar na empresa padrão como admin
+  let empresa_id = 1
+  let role = 'admin'
+  if (body.empresa_nome && body.empresa_nome.trim()) {
+    const slug = body.empresa_nome.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30) + '-' + Date.now().toString(36)
+    const r = await c.env.DB.prepare(
+      'INSERT INTO empresas (nome, slug, plano, ativo) VALUES (?, ?, ?, 1)'
+    ).bind(body.empresa_nome.trim(), slug, 'free').run()
+    empresa_id = Number(r.meta.last_row_id)
+    // Criar metas_config padrão
+    await c.env.DB.prepare(
+      `INSERT INTO metas_config (empresa_id, eficiencia_minima, eficiencia_meta, eficiencia_excelente,
+        bonus_faixa_1, bonus_faixa_2, bonus_faixa_3, bonus_faixa_4, frequencia_minima, retrabalho_limite, dias_uteis_mes)
+        VALUES (?, 70, 85, 100, 100, 250, 400, 600, 90, 5, 22)`
+    ).bind(empresa_id).run()
+  }
+
+  const senha_hash = await hashPassword(body.senha)
+  const r = await c.env.DB.prepare(
+    'INSERT INTO usuarios (empresa_id, email, nome, senha_hash, role, ativo) VALUES (?, ?, ?, ?, ?, 1)'
+  ).bind(empresa_id, email, body.nome.trim(), senha_hash, role).run()
+
+  // Já faz login
+  const secret = getJwtSecret(c.env)
+  const { token, jti, exp } = await createToken(
+    { sub: Number(r.meta.last_row_id), email, nome: body.nome.trim(), empresa_id, role: role as any },
+    secret
+  )
+  await c.env.DB.prepare('INSERT INTO sessoes (usuario_id, jti, expires_at) VALUES (?, ?, ?)')
+    .bind(r.meta.last_row_id, jti, new Date(exp * 1000).toISOString()).run()
+
+  setCookie(c, 'cs_token', token, {
+    httpOnly: true, secure: true, sameSite: 'Lax',
+    path: '/', maxAge: 60 * 60 * 24 * 7,
+  })
+  return c.json({
+    token,
+    user: { id: r.meta.last_row_id, email, nome: body.nome, role, empresa_id },
+  })
+})
+
+app.post('/api/auth/logout', async (c) => {
+  const token = getTokenFromRequest(c)
+  if (token) {
+    const secret = getJwtSecret(c.env)
+    const p = await verifyToken(token, secret)
+    if (p) {
+      await c.env.DB.prepare('UPDATE sessoes SET revoked = 1 WHERE jti = ?').bind(p.jti).run()
+    }
+  }
+  deleteCookie(c, 'cs_token', { path: '/' })
+  return c.json({ ok: true })
+})
+
+app.get('/api/auth/me', async (c) => {
+  const token = getTokenFromRequest(c)
+  if (!token) return c.json({ authenticated: false, reason: 'no_token' })
+  const secret = getJwtSecret(c.env)
+  try {
+    const p = await verifyToken(token, secret)
+    if (!p) return c.json({ authenticated: false, reason: 'invalid_token' })
+    const user = await c.env.DB.prepare(
+      'SELECT u.id, u.email, u.nome, u.role, u.empresa_id, e.nome as empresa_nome FROM usuarios u JOIN empresas e ON e.id = u.empresa_id WHERE u.id = ?'
+    ).bind(p.sub).first<any>()
+    if (!user) return c.json({ authenticated: false, reason: 'user_not_found' })
+    return c.json({ authenticated: true, user })
+  } catch (e: any) {
+    return c.json({ authenticated: false, reason: 'exception', msg: e.message })
+  }
+})
+
+/* =============================================================
+ *  API — HEALTH / CONFIG
+ * ============================================================= */
+app.get('/api/health', (c) => c.json({ ok: true, ts: Date.now(), version: '1.1.0' }))
 
 app.get('/api/config', async (c) => {
-  const cfg = await getConfig(c.env.DB)
+  const eid = await getEmpresaId(c)
+  const cfg = await getConfig(c.env.DB, eid)
   return c.json(cfg)
 })
 
-app.put('/api/config', async (c) => {
+app.put('/api/config', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
+  const u = c.get('user')
   const body = await c.req.json<Partial<MetasConfig>>()
-  const cfg = await getConfig(c.env.DB)
+  const cfg = await getConfig(c.env.DB, u.empresa_id)
   const merged = { ...cfg, ...body }
   await c.env.DB.prepare(
     `UPDATE metas_config SET
@@ -60,7 +209,7 @@ app.put('/api/config', async (c) => {
       merged.eficiencia_minima, merged.eficiencia_meta, merged.eficiencia_excelente,
       merged.bonus_faixa_1, merged.bonus_faixa_2, merged.bonus_faixa_3, merged.bonus_faixa_4,
       merged.frequencia_minima, merged.retrabalho_limite, merged.dias_uteis_mes,
-      merged.empresa_id || 1
+      u.empresa_id
     )
     .run()
   return c.json({ ok: true, config: merged })
@@ -70,44 +219,48 @@ app.put('/api/config', async (c) => {
  *  API — COSTUREIROS
  * ============================================================= */
 app.get('/api/costureiros', async (c) => {
+  const eid = await getEmpresaId(c)
   const { results } = await c.env.DB.prepare(
-    'SELECT * FROM costureiros WHERE empresa_id = 1 ORDER BY nome'
-  ).all()
+    'SELECT * FROM costureiros WHERE empresa_id = ? ORDER BY nome'
+  ).bind(eid).all()
   return c.json(results)
 })
 
-app.post('/api/costureiros', async (c) => {
-  const body = await c.req.json<{ nome: string; tipo_maquina?: string; data_admissao?: string }>()
+app.post('/api/costureiros', authMiddleware, requireRole('admin', 'gestor', 'operador'), async (c) => {
+  const u = c.get('user')
+  const body = await c.req.json<any>()
   if (!body.nome || body.nome.trim() === '')
     return c.json({ error: 'Nome é obrigatório' }, 400)
   const r = await c.env.DB.prepare(
-    'INSERT INTO costureiros (empresa_id, nome, tipo_maquina, data_admissao) VALUES (1, ?, ?, ?)'
+    'INSERT INTO costureiros (empresa_id, nome, tipo_maquina, data_admissao) VALUES (?, ?, ?, ?)'
   )
-    .bind(body.nome.trim().toUpperCase(), body.tipo_maquina || 'reta', body.data_admissao || null)
+    .bind(u.empresa_id, body.nome.trim().toUpperCase(), body.tipo_maquina || 'reta', body.data_admissao || null)
     .run()
   return c.json({ id: r.meta.last_row_id, ...body })
 })
 
-app.put('/api/costureiros/:id', async (c) => {
+app.put('/api/costureiros/:id', authMiddleware, requireRole('admin', 'gestor', 'operador'), async (c) => {
+  const u = c.get('user')
   const id = Number(c.req.param('id'))
   const body = await c.req.json<any>()
   await c.env.DB.prepare(
-    'UPDATE costureiros SET nome=?, tipo_maquina=?, ativo=? WHERE id=?'
+    'UPDATE costureiros SET nome=?, tipo_maquina=?, ativo=? WHERE id=? AND empresa_id=?'
   )
     .bind(
       (body.nome || '').trim().toUpperCase(),
       body.tipo_maquina || 'reta',
       body.ativo ?? 1,
-      id
+      id, u.empresa_id
     )
     .run()
   return c.json({ ok: true })
 })
 
-app.delete('/api/costureiros/:id', async (c) => {
+app.delete('/api/costureiros/:id', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
+  const u = c.get('user')
   const id = Number(c.req.param('id'))
-  // soft delete
-  await c.env.DB.prepare('UPDATE costureiros SET ativo=0 WHERE id=?').bind(id).run()
+  await c.env.DB.prepare('UPDATE costureiros SET ativo=0 WHERE id=? AND empresa_id=?')
+    .bind(id, u.empresa_id).run()
   return c.json({ ok: true })
 })
 
@@ -115,36 +268,41 @@ app.delete('/api/costureiros/:id', async (c) => {
  *  API — OPERAÇÕES
  * ============================================================= */
 app.get('/api/operacoes', async (c) => {
+  const eid = await getEmpresaId(c)
   const { results } = await c.env.DB.prepare(
-    'SELECT * FROM operacoes WHERE empresa_id = 1 AND ativo = 1 ORDER BY nome_operacao'
-  ).all()
+    'SELECT * FROM operacoes WHERE empresa_id = ? AND ativo = 1 ORDER BY nome_operacao'
+  ).bind(eid).all()
   return c.json(results)
 })
 
-app.post('/api/operacoes', async (c) => {
+app.post('/api/operacoes', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
+  const u = c.get('user')
   const body = await c.req.json<any>()
   const r = await c.env.DB.prepare(
-    'INSERT INTO operacoes (empresa_id, nome_operacao, grau_dificuldade, tempo_padrao_min) VALUES (1, ?, ?, ?)'
+    'INSERT INTO operacoes (empresa_id, nome_operacao, grau_dificuldade, tempo_padrao_min) VALUES (?, ?, ?, ?)'
   )
-    .bind(body.nome_operacao, body.grau_dificuldade || 1.0, body.tempo_padrao_min || 0)
+    .bind(u.empresa_id, body.nome_operacao, body.grau_dificuldade || 1.0, body.tempo_padrao_min || 0)
     .run()
   return c.json({ id: r.meta.last_row_id })
 })
 
-app.put('/api/operacoes/:id', async (c) => {
+app.put('/api/operacoes/:id', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
+  const u = c.get('user')
   const id = Number(c.req.param('id'))
   const body = await c.req.json<any>()
   await c.env.DB.prepare(
-    'UPDATE operacoes SET nome_operacao=?, grau_dificuldade=?, tempo_padrao_min=? WHERE id=?'
+    'UPDATE operacoes SET nome_operacao=?, grau_dificuldade=?, tempo_padrao_min=? WHERE id=? AND empresa_id=?'
   )
-    .bind(body.nome_operacao, body.grau_dificuldade || 1.0, body.tempo_padrao_min || 0, id)
+    .bind(body.nome_operacao, body.grau_dificuldade || 1.0, body.tempo_padrao_min || 0, id, u.empresa_id)
     .run()
   return c.json({ ok: true })
 })
 
-app.delete('/api/operacoes/:id', async (c) => {
+app.delete('/api/operacoes/:id', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
+  const u = c.get('user')
   const id = Number(c.req.param('id'))
-  await c.env.DB.prepare('UPDATE operacoes SET ativo=0 WHERE id=?').bind(id).run()
+  await c.env.DB.prepare('UPDATE operacoes SET ativo=0 WHERE id=? AND empresa_id=?')
+    .bind(id, u.empresa_id).run()
   return c.json({ ok: true })
 })
 
@@ -152,6 +310,7 @@ app.delete('/api/operacoes/:id', async (c) => {
  *  API — PRODUÇÃO
  * ============================================================= */
 app.get('/api/producao', async (c) => {
+  const eid = await getEmpresaId(c)
   const inicio = c.req.query('inicio')
   const fim = c.req.query('fim')
   const costureiro_id = c.req.query('costureiro_id')
@@ -159,19 +318,19 @@ app.get('/api/producao', async (c) => {
     SELECT p.*, c.nome AS costureiro_nome, c.tipo_maquina
     FROM producao p
     JOIN costureiros c ON c.id = p.costureiro_id
-    WHERE p.empresa_id = 1
+    WHERE p.empresa_id = ?
   `
-  const params: any[] = []
+  const params: any[] = [eid]
   if (inicio) { sql += ' AND p.data >= ?'; params.push(inicio) }
   if (fim) { sql += ' AND p.data <= ?'; params.push(fim) }
   if (costureiro_id) { sql += ' AND p.costureiro_id = ?'; params.push(Number(costureiro_id)) }
   sql += ' ORDER BY p.data DESC, p.id DESC LIMIT 2000'
-  const stmt = c.env.DB.prepare(sql)
-  const { results } = await (params.length ? stmt.bind(...params) : stmt).all()
+  const { results } = await c.env.DB.prepare(sql).bind(...params).all()
   return c.json(results)
 })
 
-app.post('/api/producao', async (c) => {
+app.post('/api/producao', authMiddleware, requireRole('admin', 'gestor', 'operador'), async (c) => {
+  const u = c.get('user')
   const body = await c.req.json<any>()
   if (!body.costureiro_id || !body.data)
     return c.json({ error: 'costureiro_id e data são obrigatórios' }, 400)
@@ -179,14 +338,11 @@ app.post('/api/producao', async (c) => {
     `INSERT INTO producao
       (empresa_id, data, costureiro_id, operacao_id, operacao, referencia_peca,
        tempo_padrao_min, quantidade_produzida, minutos_trabalhados, retrabalho)
-     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
-      body.data,
-      Number(body.costureiro_id),
-      body.operacao_id || null,
-      body.operacao || null,
-      body.referencia_peca || null,
+      u.empresa_id, body.data, Number(body.costureiro_id),
+      body.operacao_id || null, body.operacao || null, body.referencia_peca || null,
       Number(body.tempo_padrao_min) || 0,
       Number(body.quantidade_produzida) || 0,
       Number(body.minutos_trabalhados) || 0,
@@ -196,14 +352,15 @@ app.post('/api/producao', async (c) => {
   return c.json({ id: r.meta.last_row_id })
 })
 
-app.put('/api/producao/:id', async (c) => {
+app.put('/api/producao/:id', authMiddleware, requireRole('admin', 'gestor', 'operador'), async (c) => {
+  const u = c.get('user')
   const id = Number(c.req.param('id'))
   const body = await c.req.json<any>()
   await c.env.DB.prepare(
     `UPDATE producao SET
       data=?, costureiro_id=?, operacao_id=?, operacao=?, referencia_peca=?,
       tempo_padrao_min=?, quantidade_produzida=?, minutos_trabalhados=?, retrabalho=?
-      WHERE id=?`
+      WHERE id=? AND empresa_id=?`
   )
     .bind(
       body.data, Number(body.costureiro_id), body.operacao_id || null,
@@ -212,16 +369,45 @@ app.put('/api/producao/:id', async (c) => {
       Number(body.quantidade_produzida) || 0,
       Number(body.minutos_trabalhados) || 0,
       Number(body.retrabalho) || 0,
-      id
+      id, u.empresa_id
     )
     .run()
   return c.json({ ok: true })
 })
 
-app.delete('/api/producao/:id', async (c) => {
+app.delete('/api/producao/:id', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
+  const u = c.get('user')
   const id = Number(c.req.param('id'))
-  await c.env.DB.prepare('DELETE FROM producao WHERE id=?').bind(id).run()
+  await c.env.DB.prepare('DELETE FROM producao WHERE id=? AND empresa_id=?')
+    .bind(id, u.empresa_id).run()
   return c.json({ ok: true })
+})
+
+/* =============================================================
+ *  API — IMPORTADOR XLSX
+ * ============================================================= */
+app.post('/api/import/xlsx', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
+  const u = c.get('user')
+  try {
+    const formData = await c.req.formData()
+    const file = formData.get('file') as File | null
+    if (!file) return c.json({ error: 'Arquivo não enviado (campo "file")' }, 400)
+
+    const ano = Number(formData.get('ano')) || new Date().getUTCFullYear()
+    const mes = Number(formData.get('mes')) || (new Date().getUTCMonth() + 1)
+    const substituir = formData.get('substituir_mes') === 'true'
+
+    const buffer = await file.arrayBuffer()
+    const stats = await importXLSX(buffer, c.env.DB, {
+      empresa_id: u.empresa_id,
+      ano, mes,
+      substituir_mes: substituir,
+    })
+    return c.json({ ok: true, stats })
+  } catch (e: any) {
+    console.error('Erro no import:', e)
+    return c.json({ error: `Falha na importação: ${e.message}` }, 500)
+  }
 })
 
 /* =============================================================
@@ -229,6 +415,7 @@ app.delete('/api/producao/:id', async (c) => {
  * ============================================================= */
 async function obterStatsRaw(
   DB: D1Database,
+  empresa_id: number,
   inicio: string,
   fim: string,
   costureiro_id?: number
@@ -249,10 +436,11 @@ async function obterStatsRaw(
     LEFT JOIN producao p
       ON p.costureiro_id = c.id
       AND p.data BETWEEN ? AND ?
+      AND p.empresa_id = ?
     LEFT JOIN operacoes o ON o.id = p.operacao_id
-    WHERE c.empresa_id = 1 AND c.ativo = 1
+    WHERE c.empresa_id = ? AND c.ativo = 1
   `
-  const params: any[] = [inicio, fim]
+  const params: any[] = [inicio, fim, empresa_id, empresa_id]
   if (costureiro_id) { sql += ' AND c.id = ?'; params.push(costureiro_id) }
   sql += ' GROUP BY c.id, c.nome, c.tipo_maquina ORDER BY c.nome'
   const { results } = await DB.prepare(sql).bind(...params).all<StatsRaw>()
@@ -260,6 +448,7 @@ async function obterStatsRaw(
 }
 
 app.get('/api/stats', async (c) => {
+  const eid = await getEmpresaId(c)
   const hoje = new Date()
   const ano = Number(c.req.query('ano')) || hoje.getUTCFullYear()
   const mes = Number(c.req.query('mes')) || (hoje.getUTCMonth() + 1)
@@ -267,18 +456,15 @@ app.get('/api/stats', async (c) => {
   const fim = c.req.query('fim') || rangeDoMes(ano, mes).fim
 
   const [config, raws] = await Promise.all([
-    getConfig(c.env.DB),
-    obterStatsRaw(c.env.DB, inicio, fim),
+    getConfig(c.env.DB, eid),
+    obterStatsRaw(c.env.DB, eid, inicio, fim),
   ])
 
   const costureirosStats = raws.map((r) => consolidarEstatisticas(r, config))
-
-  // KPIs globais
   const totalProducao = costureirosStats.reduce((s, x) => s + x.total_producao, 0)
   const totalBonus = costureirosStats.reduce((s, x) => s + x.bonus, 0)
   const eficienciaMedia = costureirosStats.length
-    ? costureirosStats.reduce((s, x) => s + x.eficiencia, 0) / costureirosStats.length
-    : 0
+    ? costureirosStats.reduce((s, x) => s + x.eficiencia, 0) / costureirosStats.length : 0
   const comBonus = costureirosStats.filter((x) => x.bonus > 0).length
 
   return c.json({
@@ -299,6 +485,7 @@ app.get('/api/stats', async (c) => {
 })
 
 app.get('/api/stats/evolucao', async (c) => {
+  const eid = await getEmpresaId(c)
   const hoje = new Date()
   const ano = Number(c.req.query('ano')) || hoje.getUTCFullYear()
   const mes = Number(c.req.query('mes')) || (hoje.getUTCMonth() + 1)
@@ -312,10 +499,10 @@ app.get('/api/stats/evolucao', async (c) => {
       SUM(p.quantidade_produzida * p.tempo_padrao_min) AS minutos_produzidos,
       SUM(p.retrabalho) AS retrabalho
     FROM producao p
-    WHERE p.empresa_id = 1 AND p.data BETWEEN ? AND ?
+    WHERE p.empresa_id = ? AND p.data BETWEEN ? AND ?
     GROUP BY p.data
     ORDER BY p.data ASC
-  `).bind(inicio, fim).all<any>()
+  `).bind(eid, inicio, fim).all<any>()
 
   const serie = results.map((r: any) => ({
     data: r.data,
@@ -330,6 +517,7 @@ app.get('/api/stats/evolucao', async (c) => {
 })
 
 app.get('/api/stats/costureiro/:id', async (c) => {
+  const eid = await getEmpresaId(c)
   const id = Number(c.req.param('id'))
   const hoje = new Date()
   const ano = Number(c.req.query('ano')) || hoje.getUTCFullYear()
@@ -337,8 +525,8 @@ app.get('/api/stats/costureiro/:id', async (c) => {
   const { inicio, fim } = rangeDoMes(ano, mes)
 
   const [config, raws, serie] = await Promise.all([
-    getConfig(c.env.DB),
-    obterStatsRaw(c.env.DB, inicio, fim, id),
+    getConfig(c.env.DB, eid),
+    obterStatsRaw(c.env.DB, eid, inicio, fim, id),
     c.env.DB.prepare(`
       SELECT
         p.data,
@@ -347,10 +535,10 @@ app.get('/api/stats/costureiro/:id', async (c) => {
         SUM(p.quantidade_produzida * p.tempo_padrao_min) AS minutos_produzidos,
         SUM(p.retrabalho) AS retrabalho
       FROM producao p
-      WHERE p.empresa_id = 1 AND p.costureiro_id = ? AND p.data BETWEEN ? AND ?
+      WHERE p.empresa_id = ? AND p.costureiro_id = ? AND p.data BETWEEN ? AND ?
       GROUP BY p.data
       ORDER BY p.data ASC
-    `).bind(id, inicio, fim).all<any>(),
+    `).bind(eid, id, inicio, fim).all<any>(),
   ])
 
   if (raws.length === 0)
@@ -366,18 +554,16 @@ app.get('/api/stats/costureiro/:id', async (c) => {
     retrabalho: r.retrabalho || 0,
   }))
 
-  // Histórico dos últimos 6 meses (eficiência mensal)
   const historico = []
   for (let i = 5; i >= 0; i--) {
     const d = new Date(Date.UTC(ano, mes - 1 - i, 1))
     const hMes = d.getUTCMonth() + 1
     const hAno = d.getUTCFullYear()
     const range = rangeDoMes(hAno, hMes)
-    const r = await obterStatsRaw(c.env.DB, range.inicio, range.fim, id)
+    const r = await obterStatsRaw(c.env.DB, eid, range.inicio, range.fim, id)
     const s = r.length ? consolidarEstatisticas(r[0], config) : null
     historico.push({
-      ano: hAno,
-      mes: hMes,
+      ano: hAno, mes: hMes,
       label: `${String(hMes).padStart(2, '0')}/${hAno}`,
       eficiencia: s?.eficiencia || 0,
       producao: s?.total_producao || 0,
@@ -385,28 +571,20 @@ app.get('/api/stats/costureiro/:id', async (c) => {
     })
   }
 
-  return c.json({
-    periodo: { inicio, fim, ano, mes },
-    stats,
-    diario,
-    historico,
-  })
+  return c.json({ periodo: { inicio, fim, ano, mes }, stats, diario, historico })
 })
 
-/* =============================================================
- *  API — SIMULAÇÃO DE BONIFICAÇÃO
- * ============================================================= */
 app.post('/api/simulacao', async (c) => {
+  const eid = await getEmpresaId(c)
   const body = await c.req.json<Partial<MetasConfig> & { ano?: number; mes?: number }>()
   const hoje = new Date()
   const ano = body.ano || hoje.getUTCFullYear()
   const mes = body.mes || (hoje.getUTCMonth() + 1)
   const { inicio, fim } = rangeDoMes(ano, mes)
 
-  const cfgBase = await getConfig(c.env.DB)
+  const cfgBase = await getConfig(c.env.DB, eid)
   const cfg: MetasConfig = { ...cfgBase, ...body }
-
-  const raws = await obterStatsRaw(c.env.DB, inicio, fim)
+  const raws = await obterStatsRaw(c.env.DB, eid, inicio, fim)
   const costureirosStats = raws.map((r) => consolidarEstatisticas(r, cfg))
   const totalBonus = costureirosStats.reduce((s, x) => s + x.bonus, 0)
 
@@ -416,6 +594,58 @@ app.post('/api/simulacao', async (c) => {
     total_bonus: totalBonus,
     costureiros: costureirosStats,
   })
+})
+
+/* =============================================================
+ *  API — GESTÃO DE USUÁRIOS (admin)
+ * ============================================================= */
+app.get('/api/usuarios', authMiddleware, requireRole('admin'), async (c) => {
+  const u = c.get('user')
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, email, nome, role, ativo, ultimo_login, created_at FROM usuarios WHERE empresa_id = ? ORDER BY nome'
+  ).bind(u.empresa_id).all()
+  return c.json(results)
+})
+
+app.post('/api/usuarios', authMiddleware, requireRole('admin'), async (c) => {
+  const u = c.get('user')
+  const body = await c.req.json<any>()
+  if (!body.email || !body.senha || !body.nome)
+    return c.json({ error: 'Campos obrigatórios' }, 400)
+  const email = body.email.toLowerCase().trim()
+  const existente = await c.env.DB.prepare('SELECT id FROM usuarios WHERE email = ?').bind(email).first()
+  if (existente) return c.json({ error: 'E-mail já cadastrado' }, 400)
+  const senha_hash = await hashPassword(body.senha)
+  const r = await c.env.DB.prepare(
+    'INSERT INTO usuarios (empresa_id, email, nome, senha_hash, role, ativo) VALUES (?, ?, ?, ?, ?, 1)'
+  ).bind(u.empresa_id, email, body.nome.trim(), senha_hash, body.role || 'operador').run()
+  return c.json({ id: r.meta.last_row_id })
+})
+
+app.put('/api/usuarios/:id', authMiddleware, requireRole('admin'), async (c) => {
+  const u = c.get('user')
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json<any>()
+  const updates: string[] = []
+  const params: any[] = []
+  if (body.nome) { updates.push('nome = ?'); params.push(body.nome.trim()) }
+  if (body.role) { updates.push('role = ?'); params.push(body.role) }
+  if (body.ativo !== undefined) { updates.push('ativo = ?'); params.push(body.ativo ? 1 : 0) }
+  if (body.senha) { updates.push('senha_hash = ?'); params.push(await hashPassword(body.senha)) }
+  if (updates.length === 0) return c.json({ ok: true })
+  params.push(id, u.empresa_id)
+  await c.env.DB.prepare(`UPDATE usuarios SET ${updates.join(', ')} WHERE id = ? AND empresa_id = ?`)
+    .bind(...params).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/api/usuarios/:id', authMiddleware, requireRole('admin'), async (c) => {
+  const u = c.get('user')
+  const id = Number(c.req.param('id'))
+  if (id === u.sub) return c.json({ error: 'Você não pode se auto-excluir' }, 400)
+  await c.env.DB.prepare('UPDATE usuarios SET ativo = 0 WHERE id = ? AND empresa_id = ?')
+    .bind(id, u.empresa_id).run()
+  return c.json({ ok: true })
 })
 
 /* =============================================================

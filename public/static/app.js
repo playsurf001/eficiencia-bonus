@@ -17,6 +17,8 @@ const state = {
   perfil: null,
   simulacao: null,
   theme: localStorage.getItem('theme') || 'auto',
+  user: null,            // usuário autenticado
+  token: localStorage.getItem('cs_token') || null,
 };
 
 // ---------- Utilitários ----------
@@ -46,11 +48,32 @@ function toast(msg, type = 'success') {
 }
 
 async function api(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     ...options,
+    headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
+  if (res.status === 401) {
+    // Sessão expirada — voltar ao login
+    state.token = null; state.user = null;
+    localStorage.removeItem('cs_token');
+    if (state.route !== 'login') { renderLogin(); throw new Error('Sessão expirada'); }
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Erro desconhecido' }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// Upload de arquivos (multipart/form-data)
+async function apiUpload(path, formData) {
+  const headers = {};
+  if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+  const res = await fetch(path, { method: 'POST', credentials: 'include', headers, body: formData });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Erro desconhecido' }));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -69,8 +92,23 @@ const ICONS = {
   producao: 'fa-clipboard-list',
   costureiros: 'fa-users',
   operacoes: 'fa-gears',
+  importar: 'fa-file-import',
+  usuarios: 'fa-user-shield',
   config: 'fa-sliders',
 };
+
+// Permissões por role
+const ROLE_PERMS = {
+  admin:    ['overview','ranking','perfil','bonus','producao','costureiros','operacoes','importar','usuarios','config'],
+  gestor:   ['overview','ranking','perfil','bonus','producao','costureiros','operacoes','importar','config'],
+  operador: ['overview','ranking','perfil','bonus','producao','costureiros'],
+  viewer:   ['overview','ranking','perfil','bonus'],
+};
+function canAccess(route) {
+  if (!state.user) return ['overview','ranking','perfil','bonus','producao','costureiros','operacoes','config'].includes(route); // demo público
+  const perms = ROLE_PERMS[state.user.role] || [];
+  return perms.includes(route);
+}
 
 function renderLayout() {
   const root = document.getElementById('app');
@@ -100,9 +138,25 @@ function renderLayout() {
           <div class="nav-item" data-route="producao"><i class="fas ${ICONS.producao} w-5"></i> Produção</div>
           <div class="nav-item" data-route="costureiros"><i class="fas ${ICONS.costureiros} w-5"></i> Costureiros</div>
           <div class="nav-item" data-route="operacoes"><i class="fas ${ICONS.operacoes} w-5"></i> Operações</div>
+
+          <div class="px-2 py-2 mt-4 text-[10px] uppercase tracking-wider text-slate-400 font-bold">Administração</div>
+          <div class="nav-item" data-route="importar"><i class="fas ${ICONS.importar} w-5"></i> Importar XLSX</div>
+          <div class="nav-item" data-route="usuarios"><i class="fas ${ICONS.usuarios} w-5"></i> Usuários</div>
           <div class="nav-item" data-route="config"><i class="fas ${ICONS.config} w-5"></i> Configurações</div>
         </nav>
-        <div class="p-3 border-t border-slate-200 dark:border-slate-800">
+        <div class="p-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+          ${state.user ? `
+            <div class="flex items-center gap-3 p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
+              <div class="w-9 h-9 rounded-full gradient-bg text-white font-bold flex items-center justify-center text-sm">${(state.user.nome || '?')[0].toUpperCase()}</div>
+              <div class="flex-1 min-w-0">
+                <div class="font-semibold text-sm truncate">${state.user.nome}</div>
+                <div class="text-[11px] text-slate-500 truncate">${state.user.empresa_nome || ''}</div>
+              </div>
+            </div>
+            <button id="logout-btn" class="btn btn-ghost w-full justify-start text-sm"><i class="fas fa-right-from-bracket"></i> Sair</button>
+          ` : `
+            <button id="login-btn" class="btn btn-primary w-full"><i class="fas fa-right-to-bracket"></i> Entrar</button>
+          `}
           <button id="theme-toggle" class="btn btn-ghost w-full justify-start">
             <i class="fas fa-moon"></i> <span id="theme-label">Tema</span>
           </button>
@@ -163,10 +217,17 @@ function renderLayout() {
   anoSel.addEventListener('change', async (e) => { state.ano = Number(e.target.value); await refreshPeriodo(); });
   mesSel.addEventListener('change', async (e) => { state.mes = Number(e.target.value); await refreshPeriodo(); });
 
-  // Navegação
+  // Navegação — filtrar por permissão
   document.querySelectorAll('.nav-item').forEach((el) => {
-    el.addEventListener('click', () => navigate(el.dataset.route));
+    const route = el.dataset.route;
+    if (!canAccess(route)) { el.style.display = 'none'; return; }
+    el.addEventListener('click', () => navigate(route));
   });
+  // Login/Logout
+  const loginBtn = document.getElementById('login-btn');
+  if (loginBtn) loginBtn.addEventListener('click', () => renderLogin());
+  const logoutBtn = document.getElementById('logout-btn');
+  if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
 
   // Mobile drawer: clonar nav
   const drawerNav = document.getElementById('drawer-nav');
@@ -214,6 +275,10 @@ async function refreshPeriodo() {
 }
 
 async function navigate(route) {
+  if (!canAccess(route)) {
+    toast('Você não tem permissão para acessar esta área', 'error');
+    return;
+  }
   state.route = route;
   document.querySelectorAll('.nav-item').forEach((el) => {
     el.classList.toggle('active', el.dataset.route === route);
@@ -226,6 +291,8 @@ async function navigate(route) {
     producao: 'Registros de Produção',
     costureiros: 'Costureiros',
     operacoes: 'Operações',
+    importar: 'Importar Planilha XLSX',
+    usuarios: 'Gestão de Usuários',
     config: 'Configurações do Sistema',
   };
   document.getElementById('page-title').textContent = titles[route] || '';
@@ -243,12 +310,410 @@ async function navigate(route) {
     else if (route === 'producao') await viewProducao();
     else if (route === 'costureiros') await viewCostureiros();
     else if (route === 'operacoes') await viewOperacoes();
+    else if (route === 'importar') await viewImportar();
+    else if (route === 'usuarios') await viewUsuarios();
     else if (route === 'config') await viewConfig();
   } catch (e) {
     console.error(e);
     view.innerHTML = `<div class="card text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Erro: ${e.message}</div>`;
   }
 }
+
+// =====================================================
+// LOGIN / REGISTRO
+// =====================================================
+function renderLogin() {
+  state.route = 'login';
+  const root = document.getElementById('app');
+  root.innerHTML = `
+    <div class="min-h-screen flex items-center justify-center p-4 bg-slate-50 dark:bg-slate-950">
+      <div class="max-w-md w-full">
+        <div class="text-center mb-6">
+          <div class="w-16 h-16 mx-auto rounded-2xl gradient-bg flex items-center justify-center text-white text-3xl shadow-lg">
+            <i class="fas fa-scissors"></i>
+          </div>
+          <h1 class="text-3xl font-extrabold mt-4">ConfecSystem</h1>
+          <p class="text-slate-500 text-sm">Gestão Inteligente de Produção e Bonificação</p>
+        </div>
+        <div class="card">
+          <div class="flex gap-2 mb-5">
+            <button id="tab-login" class="flex-1 py-2 font-semibold border-b-2 border-brand-500 text-brand-600">Entrar</button>
+            <button id="tab-register" class="flex-1 py-2 font-semibold border-b-2 border-transparent text-slate-500">Criar conta</button>
+          </div>
+          <form id="login-form" class="space-y-3">
+            <div>
+              <label class="text-xs font-semibold text-slate-500">E-mail</label>
+              <input id="l-email" type="email" required class="input" placeholder="seu@email.com" autocomplete="email"/>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Senha</label>
+              <input id="l-senha" type="password" required class="input" placeholder="••••••••" autocomplete="current-password"/>
+            </div>
+            <button class="btn btn-primary w-full"><i class="fas fa-right-to-bracket"></i> Entrar</button>
+          </form>
+          <form id="register-form" class="space-y-3 hidden">
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Nome da Empresa</label>
+              <input id="r-empresa" class="input" placeholder="Minha Confecção Ltda"/>
+              <p class="text-[11px] text-slate-500 mt-1">Deixe vazio para entrar na empresa demonstração</p>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Seu nome</label>
+              <input id="r-nome" required class="input" placeholder="João Silva"/>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">E-mail</label>
+              <input id="r-email" type="email" required class="input" placeholder="seu@email.com"/>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Senha (mín. 6 caracteres)</label>
+              <input id="r-senha" type="password" required minlength="6" class="input" placeholder="••••••••"/>
+            </div>
+            <button class="btn btn-primary w-full"><i class="fas fa-user-plus"></i> Criar conta</button>
+          </form>
+          <div class="mt-5 pt-5 border-t border-slate-200 dark:border-slate-700 text-center">
+            <button id="demo-btn" class="text-sm text-brand-600 font-semibold hover:underline">
+              <i class="fas fa-eye mr-1"></i>Continuar como visitante (modo demonstração)
+            </button>
+          </div>
+        </div>
+        <div class="mt-4 p-3 bg-slate-100 dark:bg-slate-800/50 rounded-xl text-xs text-slate-600 dark:text-slate-400">
+          <div class="font-semibold mb-1"><i class="fas fa-info-circle"></i> Contas de teste:</div>
+          <div>• <b>admin@demo.com</b> / demo123 — Admin com acesso total</div>
+          <div>• <b>gestor@demo.com</b> / demo123 — Gestor (sem gestão de usuários)</div>
+          <div>• <b>operador@demo.com</b> / demo123 — Apenas cadastros</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const tabLogin = document.getElementById('tab-login');
+  const tabRegister = document.getElementById('tab-register');
+  const formLogin = document.getElementById('login-form');
+  const formRegister = document.getElementById('register-form');
+
+  tabLogin.addEventListener('click', () => {
+    tabLogin.classList.add('border-brand-500','text-brand-600');
+    tabLogin.classList.remove('border-transparent','text-slate-500');
+    tabRegister.classList.add('border-transparent','text-slate-500');
+    tabRegister.classList.remove('border-brand-500','text-brand-600');
+    formLogin.classList.remove('hidden');
+    formRegister.classList.add('hidden');
+  });
+  tabRegister.addEventListener('click', () => {
+    tabRegister.classList.add('border-brand-500','text-brand-600');
+    tabRegister.classList.remove('border-transparent','text-slate-500');
+    tabLogin.classList.add('border-transparent','text-slate-500');
+    tabLogin.classList.remove('border-brand-500','text-brand-600');
+    formRegister.classList.remove('hidden');
+    formLogin.classList.add('hidden');
+  });
+
+  formLogin.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api('/api/auth/login', { method: 'POST', body: {
+        email: document.getElementById('l-email').value,
+        senha: document.getElementById('l-senha').value,
+      }});
+      state.token = r.token; state.user = r.user;
+      localStorage.setItem('cs_token', r.token);
+      toast(`Bem-vindo, ${r.user.nome}!`, 'success');
+      state.stats = null;
+      renderLayout();
+      await navigate('overview');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  formRegister.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api('/api/auth/register', { method: 'POST', body: {
+        nome: document.getElementById('r-nome').value,
+        email: document.getElementById('r-email').value,
+        senha: document.getElementById('r-senha').value,
+        empresa_nome: document.getElementById('r-empresa').value,
+      }});
+      state.token = r.token; state.user = r.user;
+      localStorage.setItem('cs_token', r.token);
+      toast('Conta criada com sucesso!', 'success');
+      state.stats = null;
+      renderLayout();
+      await navigate('overview');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  document.getElementById('demo-btn').addEventListener('click', () => {
+    state.user = null; state.token = null;
+    localStorage.removeItem('cs_token');
+    renderLayout();
+    navigate('overview');
+  });
+}
+
+async function doLogout() {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
+  state.user = null; state.token = null; state.stats = null;
+  localStorage.removeItem('cs_token');
+  toast('Sessão encerrada', 'success');
+  renderLogin();
+}
+
+// =====================================================
+// IMPORTAR XLSX
+// =====================================================
+async function viewImportar() {
+  document.getElementById('view').innerHTML = `
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div class="card lg:col-span-2">
+        <h3 class="font-bold text-lg mb-2"><i class="fas fa-file-import text-brand-500 mr-2"></i>Importar Planilha de Produção</h3>
+        <p class="text-sm text-slate-500 mb-4">
+          Faça upload de planilhas XLSX existentes. O sistema detecta automaticamente o formato SENAI
+          (1 aba por costureiro) ou planilhas simples com cabeçalhos padrão.
+        </p>
+        <form id="import-form" class="space-y-4">
+          <div>
+            <label class="text-xs font-semibold text-slate-500">Arquivo .xlsx</label>
+            <div id="drop-zone" class="mt-1 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-8 text-center cursor-pointer hover:border-brand-500 hover:bg-brand-50 dark:hover:bg-brand-900/10 transition">
+              <i class="fas fa-cloud-arrow-up text-4xl text-slate-400"></i>
+              <div class="mt-2 font-semibold" id="drop-label">Clique ou arraste um arquivo XLSX aqui</div>
+              <div class="text-xs text-slate-500 mt-1">Tamanho máximo: 10MB</div>
+              <input id="file-input" type="file" accept=".xlsx,.xls" class="hidden"/>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Ano de referência</label>
+              <input id="imp-ano" type="number" class="input" value="${state.ano}"/>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Mês de referência</label>
+              <select id="imp-mes" class="input">
+                ${MESES.map((m, i) => `<option value="${i+1}" ${i+1 === state.mes ? 'selected' : ''}>${m}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <label class="flex items-center gap-2 text-sm">
+            <input id="imp-substituir" type="checkbox" class="w-4 h-4"/>
+            <span>Substituir produção existente deste mês (apaga registros anteriores)</span>
+          </label>
+          <button id="imp-submit" class="btn btn-primary w-full" disabled><i class="fas fa-upload"></i> Importar Planilha</button>
+        </form>
+        <div id="imp-result" class="hidden mt-4 p-4 rounded-xl"></div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-bold mb-3"><i class="fas fa-circle-info text-brand-500 mr-2"></i>Formatos Aceitos</h3>
+        <div class="space-y-4 text-sm">
+          <div>
+            <div class="font-semibold mb-1">📋 Formato SENAI</div>
+            <p class="text-slate-500 text-xs">Planilha com 1 aba por costureiro (01, 02, 03...), nome na célula C3, produção diária por linhas SEGUNDA/TERÇA/etc.</p>
+          </div>
+          <div>
+            <div class="font-semibold mb-1">📊 Formato Simples</div>
+            <p class="text-slate-500 text-xs mb-2">1 aba com cabeçalhos (pode variar):</p>
+            <ul class="text-xs text-slate-500 space-y-0.5 list-disc pl-4">
+              <li>data (obrigatório)</li>
+              <li>costureiro / nome / colaborador</li>
+              <li>operacao</li>
+              <li>tempo_padrao_min / tempo</li>
+              <li>quantidade_produzida / qtd</li>
+              <li>minutos_trabalhados / minutos</li>
+              <li>retrabalho (opcional)</li>
+              <li>referencia / ref (opcional)</li>
+            </ul>
+          </div>
+          <div class="pt-3 border-t border-slate-200 dark:border-slate-700">
+            <div class="font-semibold mb-1">⚙️ O que acontece?</div>
+            <ul class="text-xs text-slate-500 space-y-1 list-disc pl-4">
+              <li>Costureiros novos são criados automaticamente</li>
+              <li>Operações novas ganham dificuldade 1.0 (ajuste depois)</li>
+              <li>Datas em formato DD/MM/YYYY ou ISO</li>
+              <li>Empresa isolada (seus dados nunca se misturam)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const submitBtn = document.getElementById('imp-submit');
+  let selectedFile = null;
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('border-brand-500'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('border-brand-500'));
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault(); dropZone.classList.remove('border-brand-500');
+    if (e.dataTransfer.files.length > 0) setFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', (e) => { if (e.target.files[0]) setFile(e.target.files[0]); });
+
+  function setFile(f) {
+    if (!f.name.match(/\.xlsx?$/i)) { toast('Selecione um arquivo .xlsx', 'error'); return; }
+    if (f.size > 10 * 1024 * 1024) { toast('Arquivo maior que 10MB', 'error'); return; }
+    selectedFile = f;
+    document.getElementById('drop-label').innerHTML = `<i class="fas fa-file-excel text-emerald-500"></i> ${f.name} <span class="text-xs text-slate-500">(${(f.size/1024).toFixed(1)} KB)</span>`;
+    submitBtn.disabled = false;
+  }
+
+  document.getElementById('import-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!selectedFile) return;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<div class="loader" style="width:16px;height:16px;border-width:2px"></div> Importando...';
+    const fd = new FormData();
+    fd.append('file', selectedFile);
+    fd.append('ano', document.getElementById('imp-ano').value);
+    fd.append('mes', document.getElementById('imp-mes').value);
+    fd.append('substituir_mes', document.getElementById('imp-substituir').checked ? 'true' : 'false');
+    try {
+      const r = await apiUpload('/api/import/xlsx', fd);
+      const s = r.stats;
+      const div = document.getElementById('imp-result');
+      div.classList.remove('hidden');
+      div.className = 'mt-4 p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800';
+      div.innerHTML = `
+        <div class="font-semibold text-emerald-700 dark:text-emerald-400 mb-2"><i class="fas fa-circle-check mr-1"></i>Importação concluída!</div>
+        <div class="grid grid-cols-2 gap-3 text-sm">
+          <div><span class="text-slate-500">Produções inseridas:</span> <b>${s.producoes_inseridas}</b></div>
+          <div><span class="text-slate-500">Costureiros criados:</span> <b>${s.costureiros_criados}</b></div>
+          <div><span class="text-slate-500">Costureiros existentes:</span> <b>${s.costureiros_encontrados}</b></div>
+          <div><span class="text-slate-500">Operações criadas:</span> <b>${s.operacoes_criadas}</b></div>
+        </div>
+        ${s.avisos.length ? `<div class="mt-3 text-xs text-amber-600"><b>Avisos:</b><ul class="list-disc pl-4">${s.avisos.map(a => `<li>${a}</li>`).join('')}</ul></div>` : ''}
+        ${s.erros.length ? `<div class="mt-3 text-xs text-red-600"><b>Erros:</b><ul class="list-disc pl-4">${s.erros.map(a => `<li>${a}</li>`).join('')}</ul></div>` : ''}
+      `;
+      toast(`${s.producoes_inseridas} produções importadas!`, 'success');
+      state.stats = null; state.evolucao = null;
+    } catch (err) {
+      const div = document.getElementById('imp-result');
+      div.classList.remove('hidden');
+      div.className = 'mt-4 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400';
+      div.innerHTML = `<i class="fas fa-triangle-exclamation mr-1"></i>${err.message}`;
+      toast(err.message, 'error');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = '<i class="fas fa-upload"></i> Importar Planilha';
+    }
+  });
+}
+
+// =====================================================
+// GESTÃO DE USUÁRIOS
+// =====================================================
+async function viewUsuarios() {
+  const users = await api('/api/usuarios');
+  document.getElementById('view').innerHTML = `
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h3 class="font-bold text-lg">Usuários da Empresa</h3>
+          <p class="text-sm text-slate-500">${users.length} cadastrados — controle quem acessa o sistema</p>
+        </div>
+        <button id="new-user" class="btn btn-primary"><i class="fas fa-user-plus"></i> Novo Usuário</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase text-slate-500 border-b border-slate-200 dark:border-slate-700">
+              <th class="p-3">Nome</th><th class="p-3">E-mail</th>
+              <th class="p-3">Role</th><th class="p-3">Último login</th>
+              <th class="p-3">Status</th><th class="p-3"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${users.map(u => `
+              <tr class="t-row border-b border-slate-100 dark:border-slate-800">
+                <td class="p-3 font-semibold">${u.nome}</td>
+                <td class="p-3">${u.email}</td>
+                <td class="p-3"><span class="badge ${u.role === 'admin' ? 'badge-alto' : u.role === 'gestor' ? 'badge-medio' : 'badge-baixo'}">${u.role}</span></td>
+                <td class="p-3 text-xs text-slate-500">${u.ultimo_login ? fmt.date(u.ultimo_login.slice(0,10)) : 'Nunca'}</td>
+                <td class="p-3">${u.ativo ? '<span class="text-emerald-600 text-xs font-semibold"><i class="fas fa-circle"></i> Ativo</span>' : '<span class="text-slate-400 text-xs">Inativo</span>'}</td>
+                <td class="p-3 text-right">
+                  <button class="btn btn-ghost p-1" onclick='editUser(${JSON.stringify(u)})'><i class="fas fa-pen text-xs"></i></button>
+                  ${u.id !== state.user?.id ? `<button class="btn btn-ghost p-1 text-red-500" onclick="deleteUser(${u.id})"><i class="fas fa-trash text-xs"></i></button>` : ''}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  document.getElementById('new-user').addEventListener('click', () => openUserModal());
+}
+
+window.editUser = (u) => openUserModal(u);
+window.deleteUser = async (id) => {
+  if (!confirm('Desativar este usuário?')) return;
+  try { await api(`/api/usuarios/${id}`, { method: 'DELETE' }); toast('Usuário desativado', 'success'); await navigate('usuarios'); }
+  catch (e) { toast(e.message, 'error'); }
+};
+
+function openUserModal(user = null) {
+  const isEdit = !!user;
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-backdrop" id="modal-backdrop">
+      <div class="modal">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+          <h3 class="font-bold text-lg">${isEdit ? 'Editar' : 'Novo'} Usuário</h3>
+          <button class="btn btn-ghost p-2" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="p-5 space-y-3">
+          <div><label class="text-xs font-semibold text-slate-500">Nome</label>
+            <input id="u-nome" class="input" value="${user?.nome || ''}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">E-mail</label>
+            <input id="u-email" type="email" class="input" value="${user?.email || ''}" ${isEdit ? 'disabled' : ''}/></div>
+          <div><label class="text-xs font-semibold text-slate-500">${isEdit ? 'Nova senha (deixe vazio para manter)' : 'Senha (mín. 6 caracteres)'}</label>
+            <input id="u-senha" type="password" class="input" placeholder="••••••••"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Papel (Role)</label>
+            <select id="u-role" class="input">
+              <option value="admin" ${user?.role === 'admin' ? 'selected' : ''}>Admin (acesso total + usuários)</option>
+              <option value="gestor" ${user?.role === 'gestor' ? 'selected' : ''}>Gestor (administra tudo exceto usuários)</option>
+              <option value="operador" ${user?.role === 'operador' ? 'selected' : ''}>Operador (lança produção)</option>
+              <option value="viewer" ${user?.role === 'viewer' ? 'selected' : ''}>Visualizador (apenas leitura)</option>
+            </select></div>
+          ${isEdit ? `<div><label class="text-xs font-semibold text-slate-500">Status</label>
+            <select id="u-ativo" class="input">
+              <option value="1" ${user.ativo ? 'selected' : ''}>Ativo</option>
+              <option value="0" ${!user.ativo ? 'selected' : ''}>Inativo</option>
+            </select></div>` : ''}
+        </div>
+        <div class="p-5 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
+          <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveUser(${user?.id || 'null'})"><i class="fas fa-save"></i> Salvar</button>
+        </div>
+      </div>
+    </div>
+  `);
+  document.getElementById('modal-backdrop').addEventListener('click', (e) => { if (e.target.id === 'modal-backdrop') closeModal(); });
+}
+
+window.saveUser = async (id) => {
+  const body = {
+    nome: document.getElementById('u-nome').value,
+    email: document.getElementById('u-email').value,
+    senha: document.getElementById('u-senha').value,
+    role: document.getElementById('u-role').value,
+  };
+  if (document.getElementById('u-ativo')) body.ativo = Number(document.getElementById('u-ativo').value);
+  if (!body.nome) return toast('Nome obrigatório', 'error');
+  try {
+    if (id) {
+      if (!body.senha) delete body.senha;
+      await api(`/api/usuarios/${id}`, { method: 'PUT', body });
+    } else {
+      if (!body.email || !body.senha) return toast('E-mail e senha obrigatórios', 'error');
+      await api('/api/usuarios', { method: 'POST', body });
+    }
+    toast('Salvo', 'success');
+    closeModal();
+    await navigate('usuarios');
+  } catch (e) { toast(e.message, 'error'); }
+};
 
 // ---------- Loaders ----------
 async function loadStats() {
@@ -1391,8 +1856,19 @@ function bootChartJs() {
   });
 }
 
+async function loadCurrentUser() {
+  try {
+    const r = await fetch('/api/auth/me', {
+      credentials: 'include',
+      headers: state.token ? { 'Authorization': `Bearer ${state.token}` } : {},
+    });
+    const d = await r.json();
+    if (d.authenticated) state.user = d.user;
+  } catch {}
+}
+
 (async function () {
-  await bootChartJs();
+  await Promise.all([bootChartJs(), loadCurrentUser()]);
   renderLayout();
   await navigate('overview');
 })();
