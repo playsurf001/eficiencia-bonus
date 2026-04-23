@@ -1,0 +1,1398 @@
+/* =====================================================
+ *  ConfecSystem — SPA Frontend
+ *  Gestão de Produção e Bonificação Mensal
+ * ===================================================== */
+
+// ---------- Estado global ----------
+const state = {
+  route: 'overview',
+  ano: new Date().getFullYear(),
+  mes: new Date().getMonth() + 1,
+  stats: null,           // /api/stats
+  evolucao: null,        // /api/stats/evolucao
+  costureiros: [],
+  operacoes: [],
+  config: null,
+  selectedCostureiroId: null,
+  perfil: null,
+  simulacao: null,
+  theme: localStorage.getItem('theme') || 'auto',
+};
+
+// ---------- Utilitários ----------
+const fmt = {
+  num: (n, d = 0) => (n || 0).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d }),
+  pct: (n, d = 1) => `${(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d })}%`,
+  money: (n) => (n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
+  date: (s) => {
+    if (!s) return '';
+    const [y, m, d] = s.split('-');
+    return `${d}/${m}/${y}`;
+  },
+  dateShort: (s) => {
+    if (!s) return '';
+    const [_, m, d] = s.split('-');
+    return `${d}/${m}`;
+  },
+};
+
+function toast(msg, type = 'success') {
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'} mr-2"></i>${msg}`;
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateX(20px)'; }, 2400);
+  setTimeout(() => t.remove(), 2800);
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Erro desconhecido' }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+
+// ---------- Layout ----------
+const ICONS = {
+  overview: 'fa-gauge-high',
+  ranking: 'fa-trophy',
+  perfil: 'fa-user-chart',
+  bonus: 'fa-hand-holding-dollar',
+  producao: 'fa-clipboard-list',
+  costureiros: 'fa-users',
+  operacoes: 'fa-gears',
+  config: 'fa-sliders',
+};
+
+function renderLayout() {
+  const root = document.getElementById('app');
+  root.innerHTML = `
+    <div class="flex min-h-screen">
+      <!-- Sidebar -->
+      <aside id="sidebar" class="hidden md:flex flex-col w-64 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 sticky top-0 h-screen">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-800">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl gradient-bg flex items-center justify-center text-white">
+              <i class="fas fa-scissors"></i>
+            </div>
+            <div>
+              <div class="font-bold text-slate-900 dark:text-white">ConfecSystem</div>
+              <div class="text-[11px] text-slate-500">Gestão Inteligente</div>
+            </div>
+          </div>
+        </div>
+        <nav class="flex-1 p-3 space-y-1 overflow-y-auto">
+          <div class="px-2 py-2 text-[10px] uppercase tracking-wider text-slate-400 font-bold">Painéis</div>
+          <div class="nav-item" data-route="overview"><i class="fas ${ICONS.overview} w-5"></i> Visão Geral</div>
+          <div class="nav-item" data-route="ranking"><i class="fas ${ICONS.ranking} w-5"></i> Ranking</div>
+          <div class="nav-item" data-route="perfil"><i class="fas ${ICONS.perfil} w-5"></i> Perfil Individual</div>
+          <div class="nav-item" data-route="bonus"><i class="fas ${ICONS.bonus} w-5"></i> Bonificação</div>
+
+          <div class="px-2 py-2 mt-4 text-[10px] uppercase tracking-wider text-slate-400 font-bold">Cadastros</div>
+          <div class="nav-item" data-route="producao"><i class="fas ${ICONS.producao} w-5"></i> Produção</div>
+          <div class="nav-item" data-route="costureiros"><i class="fas ${ICONS.costureiros} w-5"></i> Costureiros</div>
+          <div class="nav-item" data-route="operacoes"><i class="fas ${ICONS.operacoes} w-5"></i> Operações</div>
+          <div class="nav-item" data-route="config"><i class="fas ${ICONS.config} w-5"></i> Configurações</div>
+        </nav>
+        <div class="p-3 border-t border-slate-200 dark:border-slate-800">
+          <button id="theme-toggle" class="btn btn-ghost w-full justify-start">
+            <i class="fas fa-moon"></i> <span id="theme-label">Tema</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="flex-1 min-w-0">
+        <!-- Topbar -->
+        <header class="sticky top-0 z-20 bg-white/80 dark:bg-slate-900/80 backdrop-blur border-b border-slate-200 dark:border-slate-800">
+          <div class="flex items-center gap-3 px-5 py-3">
+            <button id="mobile-menu" class="md:hidden btn btn-ghost p-2"><i class="fas fa-bars"></i></button>
+            <h1 id="page-title" class="font-bold text-lg md:text-xl">Visão Geral</h1>
+            <div class="flex-1"></div>
+            <div class="flex items-center gap-2 no-print">
+              <select id="mes-select" class="input py-2 px-3 text-sm w-36"></select>
+              <select id="ano-select" class="input py-2 px-3 text-sm w-24"></select>
+              <button id="print-btn" class="btn btn-secondary hidden md:inline-flex" title="Exportar PDF">
+                <i class="fas fa-file-pdf"></i> PDF
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div id="view" class="p-5 md:p-6 fade-in"></div>
+      </main>
+    </div>
+
+    <!-- Mobile menu drawer -->
+    <div id="drawer" class="hidden fixed inset-0 z-40">
+      <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" id="drawer-backdrop"></div>
+      <div class="absolute left-0 top-0 bottom-0 w-64 bg-white dark:bg-slate-900 p-4 overflow-y-auto">
+        <div class="flex items-center justify-between mb-3">
+          <div class="font-bold">Menu</div>
+          <button id="drawer-close" class="btn btn-ghost p-2"><i class="fas fa-times"></i></button>
+        </div>
+        <div id="drawer-nav" class="space-y-1"></div>
+      </div>
+    </div>
+  `;
+
+  // Popular selects de período
+  const anoSel = document.getElementById('ano-select');
+  const mesSel = document.getElementById('mes-select');
+  const thisYear = new Date().getFullYear();
+  for (let y = thisYear - 2; y <= thisYear + 1; y++) {
+    const opt = document.createElement('option');
+    opt.value = y; opt.textContent = y;
+    if (y === state.ano) opt.selected = true;
+    anoSel.appendChild(opt);
+  }
+  MESES.forEach((m, i) => {
+    const opt = document.createElement('option');
+    opt.value = i + 1; opt.textContent = m;
+    if (i + 1 === state.mes) opt.selected = true;
+    mesSel.appendChild(opt);
+  });
+  anoSel.addEventListener('change', async (e) => { state.ano = Number(e.target.value); await refreshPeriodo(); });
+  mesSel.addEventListener('change', async (e) => { state.mes = Number(e.target.value); await refreshPeriodo(); });
+
+  // Navegação
+  document.querySelectorAll('.nav-item').forEach((el) => {
+    el.addEventListener('click', () => navigate(el.dataset.route));
+  });
+
+  // Mobile drawer: clonar nav
+  const drawerNav = document.getElementById('drawer-nav');
+  drawerNav.innerHTML = document.querySelector('#sidebar nav').innerHTML;
+  drawerNav.querySelectorAll('.nav-item').forEach((el) => {
+    el.addEventListener('click', () => { navigate(el.dataset.route); document.getElementById('drawer').classList.add('hidden'); });
+  });
+  document.getElementById('mobile-menu').addEventListener('click', () => document.getElementById('drawer').classList.remove('hidden'));
+  document.getElementById('drawer-close').addEventListener('click', () => document.getElementById('drawer').classList.add('hidden'));
+  document.getElementById('drawer-backdrop').addEventListener('click', () => document.getElementById('drawer').classList.add('hidden'));
+
+  // Tema
+  document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+  updateThemeLabel();
+
+  // Print
+  document.getElementById('print-btn').addEventListener('click', () => window.print());
+}
+
+function toggleTheme() {
+  const isDark = document.documentElement.classList.toggle('dark');
+  localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  updateThemeLabel();
+  // Recarregar charts (Chart.js não aplica dark automaticamente)
+  if (state.route === 'overview' && state.stats) renderOverview();
+  if (state.route === 'perfil' && state.perfil) renderPerfil();
+  if (state.route === 'bonus' && state.stats) renderBonus();
+}
+
+function updateThemeLabel() {
+  const isDark = document.documentElement.classList.contains('dark');
+  const icon = document.querySelector('#theme-toggle i');
+  const label = document.getElementById('theme-label');
+  if (icon) icon.className = isDark ? 'fas fa-sun' : 'fas fa-moon';
+  if (label) label.textContent = isDark ? 'Modo Claro' : 'Modo Escuro';
+}
+
+async function refreshPeriodo() {
+  // Recarrega dados para todas as telas
+  state.stats = null;
+  state.evolucao = null;
+  state.perfil = null;
+  state.simulacao = null;
+  await navigate(state.route);
+}
+
+async function navigate(route) {
+  state.route = route;
+  document.querySelectorAll('.nav-item').forEach((el) => {
+    el.classList.toggle('active', el.dataset.route === route);
+  });
+  const titles = {
+    overview: 'Visão Geral',
+    ranking: 'Ranking de Costureiros',
+    perfil: 'Perfil Individual',
+    bonus: 'Controle de Bonificação',
+    producao: 'Registros de Produção',
+    costureiros: 'Costureiros',
+    operacoes: 'Operações',
+    config: 'Configurações do Sistema',
+  };
+  document.getElementById('page-title').textContent = titles[route] || '';
+  const view = document.getElementById('view');
+  view.classList.remove('fade-in');
+  void view.offsetWidth;
+  view.classList.add('fade-in');
+  view.innerHTML = `<div class="flex justify-center py-20"><div class="loader"></div></div>`;
+
+  try {
+    if (route === 'overview') await viewOverview();
+    else if (route === 'ranking') await viewRanking();
+    else if (route === 'perfil') await viewPerfil();
+    else if (route === 'bonus') await viewBonus();
+    else if (route === 'producao') await viewProducao();
+    else if (route === 'costureiros') await viewCostureiros();
+    else if (route === 'operacoes') await viewOperacoes();
+    else if (route === 'config') await viewConfig();
+  } catch (e) {
+    console.error(e);
+    view.innerHTML = `<div class="card text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Erro: ${e.message}</div>`;
+  }
+}
+
+// ---------- Loaders ----------
+async function loadStats() {
+  if (!state.stats) {
+    state.stats = await api(`/api/stats?ano=${state.ano}&mes=${state.mes}`);
+    state.config = state.stats.config;
+  }
+  return state.stats;
+}
+async function loadEvolucao() {
+  if (!state.evolucao) {
+    state.evolucao = await api(`/api/stats/evolucao?ano=${state.ano}&mes=${state.mes}`);
+  }
+  return state.evolucao;
+}
+
+// ---------- Helpers de UI ----------
+function chartColors() {
+  const dark = document.documentElement.classList.contains('dark');
+  return {
+    grid: dark ? 'rgba(148,163,184,0.12)' : 'rgba(15,23,42,0.08)',
+    text: dark ? '#cbd5e1' : '#334155',
+    brand: '#3a62fb',
+    brand2: '#7c3aed',
+    green: '#10b981',
+    amber: '#f59e0b',
+    red: '#ef4444',
+    bgCard: dark ? '#0f172a' : '#ffffff',
+  };
+}
+
+function kpiCard({ icon, label, value, sub, color = 'brand', accent }) {
+  const colorMap = {
+    brand: 'from-brand-500 to-brand-700',
+    green: 'from-emerald-500 to-emerald-700',
+    amber: 'from-amber-500 to-orange-600',
+    red: 'from-rose-500 to-red-700',
+    purple: 'from-violet-500 to-purple-700',
+  };
+  return `
+    <div class="kpi-card card">
+      <div class="flex items-start gap-4">
+        <div class="w-12 h-12 rounded-xl bg-gradient-to-br ${colorMap[color]} flex items-center justify-center text-white text-lg shrink-0">
+          <i class="fas ${icon}"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-xs font-semibold uppercase tracking-wider text-slate-500">${label}</div>
+          <div class="text-2xl md:text-3xl font-bold mt-1 truncate">${value}</div>
+          ${sub ? `<div class="text-xs text-slate-500 mt-1">${sub}</div>` : ''}
+        </div>
+        ${accent ? `<div class="text-xs font-semibold ${accent.cls}">${accent.text}</div>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function badgeClasse(classe) {
+  const map = {
+    alto: { cls: 'badge-alto', icon: 'fa-arrow-trend-up', label: 'Alto' },
+    medio: { cls: 'badge-medio', icon: 'fa-equals', label: 'Médio' },
+    baixo: { cls: 'badge-baixo', icon: 'fa-arrow-trend-down', label: 'Baixo' },
+  };
+  const b = map[classe] || map.medio;
+  return `<span class="badge ${b.cls}"><i class="fas ${b.icon}"></i> ${b.label}</span>`;
+}
+
+function barClasse(eficiencia) {
+  if (eficiencia >= 85) return 'bar-high';
+  if (eficiencia >= 70) return 'bar-med';
+  return 'bar-low';
+}
+
+// =====================================================
+// TELA 1 — VISÃO GERAL
+// =====================================================
+async function viewOverview() {
+  const [stats, evo] = await Promise.all([loadStats(), loadEvolucao()]);
+  const k = stats.kpis;
+
+  document.getElementById('view').innerHTML = `
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+      ${kpiCard({
+        icon: 'fa-tshirt', label: 'Produção Total', color: 'brand',
+        value: fmt.num(k.total_producao),
+        sub: `${k.total_costureiros} costureiros ativos`,
+      })}
+      ${kpiCard({
+        icon: 'fa-bolt', label: 'Eficiência Média', color: 'purple',
+        value: fmt.pct(k.eficiencia_media),
+        sub: `Meta: ${fmt.pct(stats.config.eficiencia_meta, 0)}`,
+      })}
+      ${kpiCard({
+        icon: 'fa-hand-holding-dollar', label: 'Total a Pagar', color: 'green',
+        value: fmt.money(k.total_bonus),
+        sub: `${k.costureiros_com_bonus} receberão bônus`,
+      })}
+      ${kpiCard({
+        icon: 'fa-chart-line', label: 'Alto Desempenho', color: 'amber',
+        value: k.alto_desempenho,
+        sub: `${k.medio_desempenho} médio · ${k.baixo_desempenho} baixo`,
+      })}
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
+      <div class="card lg:col-span-2">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h3 class="font-bold text-lg">Evolução Diária</h3>
+            <p class="text-xs text-slate-500">Produção e eficiência ao longo do mês</p>
+          </div>
+          <i class="fas fa-chart-area text-brand-500 text-xl"></i>
+        </div>
+        <div class="h-72"><canvas id="chart-evo"></canvas></div>
+      </div>
+
+      <div class="card">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h3 class="font-bold text-lg">Distribuição</h3>
+            <p class="text-xs text-slate-500">Costureiros por classe</p>
+          </div>
+          <i class="fas fa-chart-pie text-brand-500 text-xl"></i>
+        </div>
+        <div class="h-72"><canvas id="chart-dist"></canvas></div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-bold text-lg"><i class="fas fa-trophy text-amber-500 mr-2"></i>Top 5 Eficiência</h3>
+          <button onclick="navigate('ranking')" class="text-xs text-brand-600 font-semibold hover:underline">Ver todos →</button>
+        </div>
+        <div class="space-y-2">
+          ${[...stats.costureiros].sort((a,b) => b.eficiencia - a.eficiencia).slice(0,5).map((c, i) => `
+            <div class="flex items-center gap-3 p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer" onclick="openPerfil(${c.costureiro_id})">
+              <div class="w-8 h-8 rounded-full ${i===0?'bg-amber-500':i===1?'bg-slate-400':i===2?'bg-orange-600':'bg-slate-300 dark:bg-slate-600'} text-white font-bold flex items-center justify-center text-sm">${i+1}</div>
+              <div class="flex-1 min-w-0">
+                <div class="font-semibold truncate">${c.nome}</div>
+                <div class="text-xs text-slate-500">${c.tipo_maquina} · ${fmt.num(c.total_producao)} peças</div>
+              </div>
+              <div class="text-right">
+                <div class="font-bold text-emerald-600">${fmt.pct(c.eficiencia)}</div>
+                <div class="text-xs text-slate-500">${fmt.money(c.bonus)}</div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-bold text-lg mb-3"><i class="fas fa-triangle-exclamation text-red-500 mr-2"></i>Atenção Necessária</h3>
+        <div class="space-y-2">
+          ${[...stats.costureiros].filter(c => c.classe === 'baixo' || c.motivo_bloqueio).slice(0,5).map(c => `
+            <div class="flex items-center gap-3 p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer" onclick="openPerfil(${c.costureiro_id})">
+              <div class="w-8 h-8 rounded-full bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 flex items-center justify-center">
+                <i class="fas fa-triangle-exclamation text-sm"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="font-semibold truncate">${c.nome}</div>
+                <div class="text-xs text-slate-500">${c.motivo_bloqueio || `Eficiência ${fmt.pct(c.eficiencia)}`}</div>
+              </div>
+              <div class="text-right">
+                <div class="font-bold text-red-600">${fmt.pct(c.eficiencia)}</div>
+                <div class="text-xs text-slate-500">Frq: ${fmt.pct(c.frequencia)}</div>
+              </div>
+            </div>
+          `).join('') || '<p class="text-sm text-slate-500 py-4 text-center">Todos performando bem 🎉</p>'}
+        </div>
+      </div>
+    </div>
+  `;
+
+  renderOverview();
+}
+
+function renderOverview() {
+  const stats = state.stats; const evo = state.evolucao;
+  const c = chartColors();
+  Chart.defaults.color = c.text;
+  Chart.defaults.borderColor = c.grid;
+
+  // Destroy existing
+  ['chart-evo', 'chart-dist'].forEach(id => { const inst = Chart.getChart(id); if (inst) inst.destroy(); });
+
+  // Evolução
+  const ctxEvo = document.getElementById('chart-evo').getContext('2d');
+  const grad = ctxEvo.createLinearGradient(0, 0, 0, 300);
+  grad.addColorStop(0, 'rgba(58, 98, 251, 0.35)');
+  grad.addColorStop(1, 'rgba(58, 98, 251, 0.0)');
+
+  new Chart(ctxEvo, {
+    type: 'line',
+    data: {
+      labels: evo.serie.map(s => fmt.dateShort(s.data)),
+      datasets: [
+        {
+          label: 'Produção (peças)', data: evo.serie.map(s => s.producao),
+          borderColor: c.brand, backgroundColor: grad, fill: true, tension: 0.35,
+          pointRadius: 3, pointBackgroundColor: c.brand, yAxisID: 'y',
+        },
+        {
+          label: 'Eficiência (%)', data: evo.serie.map(s => s.eficiencia),
+          borderColor: c.brand2, backgroundColor: 'transparent', tension: 0.35,
+          borderDash: [6, 4], pointRadius: 2, yAxisID: 'y1',
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { intersect: false, mode: 'index' },
+      plugins: { legend: { position: 'bottom' } },
+      scales: {
+        y: { beginAtZero: true, grid: { color: c.grid }, title: { display: true, text: 'Peças' } },
+        y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '%' } },
+        x: { grid: { color: c.grid } },
+      },
+    },
+  });
+
+  // Distribuição
+  const ctxDist = document.getElementById('chart-dist').getContext('2d');
+  new Chart(ctxDist, {
+    type: 'doughnut',
+    data: {
+      labels: ['Alto', 'Médio', 'Baixo'],
+      datasets: [{
+        data: [stats.kpis.alto_desempenho, stats.kpis.medio_desempenho, stats.kpis.baixo_desempenho],
+        backgroundColor: [c.green, c.amber, c.red],
+        borderColor: c.bgCard, borderWidth: 3,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '65%',
+      plugins: { legend: { position: 'bottom' } },
+    },
+  });
+}
+
+// =====================================================
+// TELA 2 — RANKING
+// =====================================================
+async function viewRanking() {
+  const stats = await loadStats();
+  const sorted = [...stats.costureiros].sort((a, b) => b.eficiencia - a.eficiencia);
+
+  document.getElementById('view').innerHTML = `
+    <div class="card">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+        <div>
+          <h3 class="font-bold text-lg">Ranking de Eficiência — ${MESES[state.mes-1]}/${state.ano}</h3>
+          <p class="text-sm text-slate-500">Ordenado por eficiência real, ponderada pela dificuldade das operações</p>
+        </div>
+        <div class="flex gap-2">
+          <input id="search" class="input" placeholder="Buscar costureiro..." />
+          <select id="filter-classe" class="input w-40">
+            <option value="">Todas as classes</option>
+            <option value="alto">Alto desempenho</option>
+            <option value="medio">Médio</option>
+            <option value="baixo">Baixo</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase text-slate-500 border-b border-slate-200 dark:border-slate-700">
+              <th class="p-3">#</th>
+              <th class="p-3">Costureiro</th>
+              <th class="p-3 hidden sm:table-cell">Máquina</th>
+              <th class="p-3 text-right">Produção</th>
+              <th class="p-3 text-right">Eficiência</th>
+              <th class="p-3 text-right hidden md:table-cell">Ponderada</th>
+              <th class="p-3 text-right hidden lg:table-cell">Frq.</th>
+              <th class="p-3 text-right hidden lg:table-cell">Qual.</th>
+              <th class="p-3 text-right">Bônus</th>
+              <th class="p-3">Classe</th>
+            </tr>
+          </thead>
+          <tbody id="ranking-body"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const renderBody = () => {
+    const term = (document.getElementById('search').value || '').toLowerCase().trim();
+    const classeFilter = document.getElementById('filter-classe').value;
+    const filtered = sorted
+      .filter(c => !term || c.nome.toLowerCase().includes(term))
+      .filter(c => !classeFilter || c.classe === classeFilter);
+
+    document.getElementById('ranking-body').innerHTML = filtered.map((c, i) => {
+      const pos = sorted.indexOf(c) + 1;
+      const posClr = pos === 1 ? 'bg-amber-500' : pos === 2 ? 'bg-slate-400' : pos === 3 ? 'bg-orange-600' : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300';
+      return `
+        <tr class="t-row border-b border-slate-100 dark:border-slate-800 cursor-pointer" onclick="openPerfil(${c.costureiro_id})">
+          <td class="p-3"><span class="inline-flex w-7 h-7 rounded-full ${posClr} text-white font-bold items-center justify-center text-xs">${pos}</span></td>
+          <td class="p-3 font-semibold">${c.nome}</td>
+          <td class="p-3 hidden sm:table-cell"><span class="text-xs px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800">${c.tipo_maquina}</span></td>
+          <td class="p-3 text-right font-semibold">${fmt.num(c.total_producao)}</td>
+          <td class="p-3 text-right">
+            <div class="font-bold">${fmt.pct(c.eficiencia)}</div>
+            <div class="bar-bg mt-1 w-24 ml-auto"><div class="bar-fill ${barClasse(c.eficiencia)}" style="width:${Math.min(150, c.eficiencia)}%"></div></div>
+          </td>
+          <td class="p-3 text-right hidden md:table-cell text-slate-600 dark:text-slate-300">${fmt.pct(c.eficiencia_ponderada)}</td>
+          <td class="p-3 text-right hidden lg:table-cell">${fmt.pct(c.frequencia)}</td>
+          <td class="p-3 text-right hidden lg:table-cell">${fmt.pct(c.qualidade)}</td>
+          <td class="p-3 text-right font-bold ${c.bonus > 0 ? 'text-emerald-600' : 'text-slate-400'}">${fmt.money(c.bonus)}</td>
+          <td class="p-3">${badgeClasse(c.classe)}</td>
+        </tr>
+      `;
+    }).join('') || '<tr><td colspan="10" class="p-8 text-center text-slate-500">Nenhum resultado</td></tr>';
+  };
+
+  document.getElementById('search').addEventListener('input', renderBody);
+  document.getElementById('filter-classe').addEventListener('change', renderBody);
+  renderBody();
+}
+
+// =====================================================
+// TELA 3 — PERFIL INDIVIDUAL
+// =====================================================
+window.openPerfil = async (id) => {
+  state.selectedCostureiroId = id;
+  await navigate('perfil');
+};
+
+async function viewPerfil() {
+  const stats = await loadStats();
+  if (!state.selectedCostureiroId && stats.costureiros.length > 0) {
+    state.selectedCostureiroId = stats.costureiros[0].costureiro_id;
+  }
+  if (!state.selectedCostureiroId) {
+    document.getElementById('view').innerHTML = '<div class="card text-center text-slate-500 py-10">Nenhum costureiro disponível</div>';
+    return;
+  }
+
+  const perfil = await api(`/api/stats/costureiro/${state.selectedCostureiroId}?ano=${state.ano}&mes=${state.mes}`);
+  state.perfil = perfil;
+  const s = perfil.stats;
+
+  document.getElementById('view').innerHTML = `
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
+      <div class="card lg:col-span-1">
+        <div class="flex items-center gap-4">
+          <div class="efi-ring" style="background: conic-gradient(${s.eficiencia >= 85 ? '#10b981' : s.eficiencia >= 70 ? '#f59e0b' : '#ef4444'} ${Math.min(100, s.eficiencia)}%, rgba(148,163,184,0.2) 0);">
+            <div class="w-16 h-16 rounded-full bg-white dark:bg-slate-900 flex items-center justify-center text-slate-900 dark:text-white font-bold text-sm">
+              ${fmt.pct(s.eficiencia, 0)}
+            </div>
+          </div>
+          <div class="flex-1 min-w-0">
+            <h2 class="font-bold text-xl truncate">${s.nome}</h2>
+            <div class="text-sm text-slate-500"><i class="fas fa-cog mr-1"></i>${s.tipo_maquina}</div>
+            <div class="mt-2">${badgeClasse(s.classe)}</div>
+          </div>
+        </div>
+
+        <div class="mt-5">
+          <label class="text-xs font-semibold text-slate-500">Selecionar costureiro</label>
+          <select id="cost-picker" class="input mt-1">
+            ${[...stats.costureiros].sort((a,b)=>a.nome.localeCompare(b.nome)).map(c =>
+              `<option value="${c.costureiro_id}" ${c.costureiro_id === state.selectedCostureiroId ? 'selected' : ''}>${c.nome}</option>`
+            ).join('')}
+          </select>
+        </div>
+      </div>
+
+      <div class="card lg:col-span-2">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div>
+            <div class="text-xs text-slate-500 uppercase">Produção</div>
+            <div class="text-2xl font-bold">${fmt.num(s.total_producao)}</div>
+            <div class="text-xs text-slate-500">peças</div>
+          </div>
+          <div>
+            <div class="text-xs text-slate-500 uppercase">Frequência</div>
+            <div class="text-2xl font-bold">${fmt.pct(s.frequencia)}</div>
+            <div class="text-xs text-slate-500">${s.dias_trabalhados}/${s.dias_uteis} dias</div>
+          </div>
+          <div>
+            <div class="text-xs text-slate-500 uppercase">Qualidade</div>
+            <div class="text-2xl font-bold">${fmt.pct(s.qualidade)}</div>
+            <div class="text-xs text-slate-500">${s.retrabalho_total} retrabalhos</div>
+          </div>
+          <div>
+            <div class="text-xs text-slate-500 uppercase">Bônus</div>
+            <div class="text-2xl font-bold ${s.bonus > 0 ? 'text-emerald-600' : 'text-slate-400'}">${fmt.money(s.bonus)}</div>
+            <div class="text-xs ${s.motivo_bloqueio ? 'text-red-500' : 'text-slate-500'} truncate" title="${s.motivo_bloqueio || ''}">
+              ${s.motivo_bloqueio || 'Liberado'}
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-5 pt-5 border-t border-slate-200 dark:border-slate-700">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+            <div><span class="text-slate-500">Min. trabalhados:</span> <span class="font-semibold">${fmt.num(s.total_minutos_trabalhados)}</span></div>
+            <div><span class="text-slate-500">Min. produzidos:</span> <span class="font-semibold">${fmt.num(s.total_minutos_produzidos)}</span></div>
+            <div><span class="text-slate-500">Ef. ponderada:</span> <span class="font-semibold">${fmt.pct(s.eficiencia_ponderada)}</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">
+      <div class="card">
+        <h3 class="font-bold mb-3"><i class="fas fa-chart-line text-brand-500 mr-2"></i>Desempenho Diário</h3>
+        <div class="h-64"><canvas id="chart-diario"></canvas></div>
+      </div>
+      <div class="card">
+        <h3 class="font-bold mb-3"><i class="fas fa-history text-brand-500 mr-2"></i>Histórico (6 meses)</h3>
+        <div class="h-64"><canvas id="chart-historico"></canvas></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="font-bold mb-3"><i class="fas fa-list text-brand-500 mr-2"></i>Produção no mês</h3>
+      <div id="perfil-producoes" class="text-sm text-slate-500">Carregando...</div>
+    </div>
+  `;
+
+  document.getElementById('cost-picker').addEventListener('change', async (e) => {
+    state.selectedCostureiroId = Number(e.target.value);
+    await navigate('perfil');
+  });
+
+  renderPerfil();
+
+  // Carregar produções
+  const producoes = await api(`/api/producao?inicio=${perfil.periodo.inicio}&fim=${perfil.periodo.fim}&costureiro_id=${state.selectedCostureiroId}`);
+  document.getElementById('perfil-producoes').innerHTML = producoes.length ? `
+    <div class="overflow-x-auto">
+      <table class="w-full">
+        <thead>
+          <tr class="text-left text-xs uppercase text-slate-500 border-b border-slate-200 dark:border-slate-700">
+            <th class="p-2">Data</th><th class="p-2">Operação</th><th class="p-2">Ref.</th>
+            <th class="p-2 text-right">Qtd</th><th class="p-2 text-right">Min Trab.</th>
+            <th class="p-2 text-right">Tempo Padrão</th><th class="p-2 text-right">Ef.</th><th class="p-2 text-right">Retr.</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${producoes.slice(0, 100).map(p => {
+            const ef = p.minutos_trabalhados > 0 ? (p.quantidade_produzida * p.tempo_padrao_min / p.minutos_trabalhados) * 100 : 0;
+            return `<tr class="t-row border-b border-slate-100 dark:border-slate-800">
+              <td class="p-2">${fmt.date(p.data)}</td>
+              <td class="p-2">${p.operacao || '-'}</td>
+              <td class="p-2">${p.referencia_peca || '-'}</td>
+              <td class="p-2 text-right">${fmt.num(p.quantidade_produzida)}</td>
+              <td class="p-2 text-right">${fmt.num(p.minutos_trabalhados, 1)}</td>
+              <td class="p-2 text-right">${fmt.num(p.tempo_padrao_min, 1)}</td>
+              <td class="p-2 text-right font-semibold">${fmt.pct(ef)}</td>
+              <td class="p-2 text-right ${p.retrabalho > 0 ? 'text-red-500' : 'text-slate-400'}">${p.retrabalho}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  ` : '<div class="text-center py-6 text-slate-400">Sem produções no período</div>';
+}
+
+function renderPerfil() {
+  const c = chartColors();
+  Chart.defaults.color = c.text;
+  const perfil = state.perfil;
+
+  ['chart-diario', 'chart-historico'].forEach(id => { const inst = Chart.getChart(id); if (inst) inst.destroy(); });
+
+  const ctxD = document.getElementById('chart-diario');
+  if (ctxD) {
+    new Chart(ctxD.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: perfil.diario.map(d => fmt.dateShort(d.data)),
+        datasets: [
+          { type: 'bar', label: 'Produção', data: perfil.diario.map(d => d.producao), backgroundColor: c.brand, borderRadius: 4, yAxisID: 'y' },
+          { type: 'line', label: 'Eficiência %', data: perfil.diario.map(d => d.eficiencia), borderColor: c.green, backgroundColor: 'transparent', tension: 0.3, yAxisID: 'y1' },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'bottom' } },
+        scales: {
+          y: { beginAtZero: true, grid: { color: c.grid } },
+          y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false } },
+          x: { grid: { color: c.grid } },
+        },
+      },
+    });
+  }
+
+  const ctxH = document.getElementById('chart-historico');
+  if (ctxH) {
+    new Chart(ctxH.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: perfil.historico.map(h => h.label),
+        datasets: [{
+          label: 'Eficiência %', data: perfil.historico.map(h => h.eficiencia),
+          borderColor: c.brand2, backgroundColor: 'rgba(124,58,237,0.1)', fill: true,
+          tension: 0.3, pointRadius: 5, pointBackgroundColor: c.brand2,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'bottom' } },
+        scales: { y: { beginAtZero: true, grid: { color: c.grid } }, x: { grid: { color: c.grid } } },
+      },
+    });
+  }
+}
+
+// =====================================================
+// TELA 4 — BONIFICAÇÃO
+// =====================================================
+async function viewBonus() {
+  const stats = await loadStats();
+  const cfg = stats.config;
+
+  document.getElementById('view').innerHTML = `
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
+      <div class="card lg:col-span-2 gradient-bg text-white">
+        <div class="text-sm uppercase tracking-wider opacity-80">Total a Pagar em ${MESES[state.mes-1]}/${state.ano}</div>
+        <div class="text-5xl font-extrabold mt-2">${fmt.money(stats.kpis.total_bonus)}</div>
+        <div class="mt-3 text-sm opacity-90">${stats.kpis.costureiros_com_bonus} de ${stats.kpis.total_costureiros} costureiros receberão bonificação</div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-bold mb-3"><i class="fas fa-sliders text-brand-500 mr-2"></i>Tabela de Faixas</h3>
+        <div class="space-y-2 text-sm">
+          <div class="flex justify-between p-2 rounded-lg bg-red-50 dark:bg-red-900/20"><span>Menor que 70%</span><span class="font-bold text-red-600">${fmt.money(0)}</span></div>
+          <div class="flex justify-between p-2 rounded-lg bg-amber-50 dark:bg-amber-900/20"><span>70% — 85%</span><span class="font-bold text-amber-600">${fmt.money(cfg.bonus_faixa_1)}</span></div>
+          <div class="flex justify-between p-2 rounded-lg bg-emerald-50 dark:bg-emerald-900/20"><span>85% — 100%</span><span class="font-bold text-emerald-600">${fmt.money(cfg.bonus_faixa_2)}</span></div>
+          <div class="flex justify-between p-2 rounded-lg bg-brand-50 dark:bg-brand-900/20"><span>100% — 115%</span><span class="font-bold text-brand-600">${fmt.money(cfg.bonus_faixa_3)}</span></div>
+          <div class="flex justify-between p-2 rounded-lg bg-violet-50 dark:bg-violet-900/20"><span>Acima de 115%</span><span class="font-bold text-violet-600">${fmt.money(cfg.bonus_faixa_4)}</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-5 no-print">
+      <h3 class="font-bold mb-3"><i class="fas fa-flask text-brand-500 mr-2"></i>Simulação de Cenários</h3>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Faixa 1 (70-85%)</label>
+          <input id="sim-f1" class="input" type="number" value="${cfg.bonus_faixa_1}" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Faixa 2 (85-100%)</label>
+          <input id="sim-f2" class="input" type="number" value="${cfg.bonus_faixa_2}" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Faixa 3 (100-115%)</label>
+          <input id="sim-f3" class="input" type="number" value="${cfg.bonus_faixa_3}" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Faixa 4 (>115%)</label>
+          <input id="sim-f4" class="input" type="number" value="${cfg.bonus_faixa_4}" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Freq. mín. (%)</label>
+          <input id="sim-freq" class="input" type="number" step="0.1" value="${cfg.frequencia_minima}" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Retrabalho limite</label>
+          <input id="sim-retr" class="input" type="number" value="${cfg.retrabalho_limite}" />
+        </div>
+        <div class="col-span-2 flex items-end gap-2">
+          <button id="sim-btn" class="btn btn-primary flex-1"><i class="fas fa-play"></i> Simular</button>
+          <button id="sim-reset" class="btn btn-secondary"><i class="fas fa-undo"></i></button>
+        </div>
+      </div>
+      <div id="sim-result" class="hidden p-3 rounded-xl bg-brand-50 dark:bg-brand-900/20 border border-brand-200 dark:border-brand-800"></div>
+    </div>
+
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-bold">Folha de Bonificação Detalhada</h3>
+        <button id="export-csv" class="btn btn-secondary no-print"><i class="fas fa-file-csv"></i> CSV</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase text-slate-500 border-b border-slate-200 dark:border-slate-700">
+              <th class="p-3">Costureiro</th>
+              <th class="p-3 text-right">Produção</th>
+              <th class="p-3 text-right">Eficiência</th>
+              <th class="p-3 text-right">Frequência</th>
+              <th class="p-3 text-right">Retrab.</th>
+              <th class="p-3 text-right">Bônus</th>
+              <th class="p-3">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${[...stats.costureiros].sort((a,b)=>b.bonus-a.bonus).map(c => `
+              <tr class="t-row border-b border-slate-100 dark:border-slate-800">
+                <td class="p-3 font-semibold cursor-pointer" onclick="openPerfil(${c.costureiro_id})">${c.nome}</td>
+                <td class="p-3 text-right">${fmt.num(c.total_producao)}</td>
+                <td class="p-3 text-right">${fmt.pct(c.eficiencia)}</td>
+                <td class="p-3 text-right">${fmt.pct(c.frequencia)}</td>
+                <td class="p-3 text-right ${c.retrabalho_total > cfg.retrabalho_limite ? 'text-red-600 font-bold' : ''}">${c.retrabalho_total}</td>
+                <td class="p-3 text-right font-bold ${c.bonus > 0 ? 'text-emerald-600' : 'text-slate-400'}">${fmt.money(c.bonus)}</td>
+                <td class="p-3">
+                  ${c.bonus > 0
+                    ? '<span class="badge badge-alto"><i class="fas fa-check"></i> Pagar</span>'
+                    : `<span class="badge badge-baixo" title="${c.motivo_bloqueio || ''}"><i class="fas fa-ban"></i> Bloqueado</span>`
+                  }
+                </td>
+              </tr>
+            `).join('')}
+            <tr class="bg-slate-50 dark:bg-slate-800/50 font-bold">
+              <td class="p-3">TOTAL</td>
+              <td class="p-3 text-right">${fmt.num(stats.kpis.total_producao)}</td>
+              <td class="p-3 text-right">${fmt.pct(stats.kpis.eficiencia_media)}</td>
+              <td class="p-3"></td><td class="p-3"></td>
+              <td class="p-3 text-right text-emerald-600">${fmt.money(stats.kpis.total_bonus)}</td>
+              <td class="p-3"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('sim-btn').addEventListener('click', simular);
+  document.getElementById('sim-reset').addEventListener('click', async () => { state.simulacao = null; await navigate('bonus'); });
+  document.getElementById('export-csv').addEventListener('click', () => exportCSV(stats.costureiros));
+}
+
+function renderBonus() { /* sem charts nesta tela */ }
+
+async function simular() {
+  const body = {
+    ano: state.ano, mes: state.mes,
+    bonus_faixa_1: Number(document.getElementById('sim-f1').value),
+    bonus_faixa_2: Number(document.getElementById('sim-f2').value),
+    bonus_faixa_3: Number(document.getElementById('sim-f3').value),
+    bonus_faixa_4: Number(document.getElementById('sim-f4').value),
+    frequencia_minima: Number(document.getElementById('sim-freq').value),
+    retrabalho_limite: Number(document.getElementById('sim-retr').value),
+  };
+  try {
+    const sim = await api('/api/simulacao', { method: 'POST', body });
+    const container = document.getElementById('sim-result');
+    const atual = state.stats.kpis.total_bonus;
+    const diff = sim.total_bonus - atual;
+    const diffTxt = diff === 0 ? 'Sem alteração' : diff > 0
+      ? `<span class="text-red-600">+${fmt.money(diff)}</span> a mais`
+      : `<span class="text-emerald-600">${fmt.money(diff)}</span> a menos`;
+    container.classList.remove('hidden');
+    container.innerHTML = `
+      <div class="flex flex-wrap items-center gap-6">
+        <div>
+          <div class="text-xs uppercase text-slate-500">Total simulado</div>
+          <div class="text-2xl font-bold text-brand-600">${fmt.money(sim.total_bonus)}</div>
+        </div>
+        <div>
+          <div class="text-xs uppercase text-slate-500">vs. configuração atual</div>
+          <div class="text-lg font-semibold">${diffTxt}</div>
+        </div>
+        <div>
+          <div class="text-xs uppercase text-slate-500">Receberão</div>
+          <div class="text-lg font-semibold">${sim.costureiros.filter(c => c.bonus > 0).length} costureiros</div>
+        </div>
+      </div>
+    `;
+    toast('Simulação calculada!', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function exportCSV(lista) {
+  const header = ['Costureiro','Maquina','Producao','Eficiencia','Ef_Ponderada','Frequencia','Dias_Trabalhados','Retrabalho','Qualidade','Bonus','Motivo_Bloqueio'];
+  const rows = lista.map(c => [
+    c.nome, c.tipo_maquina, c.total_producao, c.eficiencia, c.eficiencia_ponderada,
+    c.frequencia, c.dias_trabalhados, c.retrabalho_total, c.qualidade, c.bonus,
+    (c.motivo_bloqueio || '').replace(/,/g, ' ')
+  ]);
+  const csv = [header, ...rows].map(r => r.join(',')).join('\n');
+  const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `bonificacao_${state.ano}_${String(state.mes).padStart(2,'0')}.csv`;
+  a.click();
+  toast('CSV exportado!', 'success');
+}
+
+// =====================================================
+// CRUD — PRODUÇÃO
+// =====================================================
+async function viewProducao() {
+  const [producoes, costureiros, operacoes] = await Promise.all([
+    api(`/api/producao?inicio=${state.ano}-${String(state.mes).padStart(2,'0')}-01&fim=${state.ano}-${String(state.mes).padStart(2,'0')}-31`),
+    api('/api/costureiros'),
+    api('/api/operacoes'),
+  ]);
+  state.costureiros = costureiros; state.operacoes = operacoes;
+
+  document.getElementById('view').innerHTML = `
+    <div class="card">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+        <div>
+          <h3 class="font-bold text-lg">Registros de Produção</h3>
+          <p class="text-sm text-slate-500">${producoes.length} registros no período</p>
+        </div>
+        <button id="new-prod" class="btn btn-primary"><i class="fas fa-plus"></i> Novo Registro</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase text-slate-500 border-b border-slate-200 dark:border-slate-700">
+              <th class="p-2">Data</th><th class="p-2">Costureiro</th><th class="p-2">Operação</th>
+              <th class="p-2">Ref.</th><th class="p-2 text-right">Qtd</th>
+              <th class="p-2 text-right">Tempo Padrão</th><th class="p-2 text-right">Min Trab.</th>
+              <th class="p-2 text-right">Retrab.</th><th class="p-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${producoes.slice(0, 500).map(p => `
+              <tr class="t-row border-b border-slate-100 dark:border-slate-800">
+                <td class="p-2">${fmt.date(p.data)}</td>
+                <td class="p-2 font-semibold">${p.costureiro_nome}</td>
+                <td class="p-2">${p.operacao || '-'}</td>
+                <td class="p-2">${p.referencia_peca || '-'}</td>
+                <td class="p-2 text-right">${fmt.num(p.quantidade_produzida)}</td>
+                <td class="p-2 text-right">${fmt.num(p.tempo_padrao_min, 1)}</td>
+                <td class="p-2 text-right">${fmt.num(p.minutos_trabalhados, 1)}</td>
+                <td class="p-2 text-right ${p.retrabalho > 0 ? 'text-red-500 font-bold' : 'text-slate-400'}">${p.retrabalho}</td>
+                <td class="p-2 text-right">
+                  <button class="btn btn-ghost p-1" onclick='editProd(${JSON.stringify(p)})'><i class="fas fa-pen text-xs"></i></button>
+                  <button class="btn btn-ghost p-1 text-red-500" onclick="deleteProd(${p.id})"><i class="fas fa-trash text-xs"></i></button>
+                </td>
+              </tr>
+            `).join('') || '<tr><td colspan="9" class="p-8 text-center text-slate-500">Nenhum registro. Clique em "Novo Registro" para começar.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('new-prod').addEventListener('click', () => openProdModal());
+}
+
+window.editProd = (p) => openProdModal(p);
+window.deleteProd = async (id) => {
+  if (!confirm('Excluir este registro?')) return;
+  await api(`/api/producao/${id}`, { method: 'DELETE' });
+  toast('Registro excluído', 'success');
+  state.stats = null;
+  await navigate('producao');
+};
+
+function openProdModal(prod = null) {
+  const isEdit = !!prod;
+  const today = new Date().toISOString().slice(0,10);
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-backdrop" id="modal-backdrop">
+      <div class="modal">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+          <h3 class="font-bold text-lg">${isEdit ? 'Editar' : 'Novo'} Registro de Produção</h3>
+          <button class="btn btn-ghost p-2" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="p-5 space-y-3">
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="text-xs font-semibold text-slate-500">Data</label>
+              <input type="date" id="p-data" class="input" value="${prod?.data || today}"/></div>
+            <div><label class="text-xs font-semibold text-slate-500">Costureiro</label>
+              <select id="p-cost" class="input">
+                ${state.costureiros.filter(c => c.ativo).map(c => `<option value="${c.id}" ${prod?.costureiro_id === c.id ? 'selected' : ''}>${c.nome}</option>`).join('')}
+              </select></div>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-500">Operação</label>
+            <select id="p-op" class="input">
+              <option value="">-- selecione --</option>
+              ${state.operacoes.map(o => `<option value="${o.id}" data-nome="${o.nome_operacao}" data-tempo="${o.tempo_padrao_min}" ${prod?.operacao_id === o.id ? 'selected' : ''}>${o.nome_operacao} (${o.tempo_padrao_min} min)</option>`).join('')}
+            </select>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="text-xs font-semibold text-slate-500">Referência da peça</label>
+              <input id="p-ref" class="input" value="${prod?.referencia_peca || ''}"/></div>
+            <div><label class="text-xs font-semibold text-slate-500">Tempo Padrão (min)</label>
+              <input id="p-tempo" type="number" step="0.1" class="input" value="${prod?.tempo_padrao_min || ''}"/></div>
+          </div>
+          <div class="grid grid-cols-3 gap-3">
+            <div><label class="text-xs font-semibold text-slate-500">Qtd Produzida</label>
+              <input id="p-qtd" type="number" class="input" value="${prod?.quantidade_produzida || 0}"/></div>
+            <div><label class="text-xs font-semibold text-slate-500">Min Trabalhados</label>
+              <input id="p-min" type="number" step="0.1" class="input" value="${prod?.minutos_trabalhados || 0}"/></div>
+            <div><label class="text-xs font-semibold text-slate-500">Retrabalho</label>
+              <input id="p-retr" type="number" class="input" value="${prod?.retrabalho || 0}"/></div>
+          </div>
+        </div>
+        <div class="p-5 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
+          <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveProd(${prod?.id || 'null'})"><i class="fas fa-save"></i> Salvar</button>
+        </div>
+      </div>
+    </div>
+  `);
+  document.getElementById('modal-backdrop').addEventListener('click', (e) => { if (e.target.id === 'modal-backdrop') closeModal(); });
+
+  // auto preencher tempo padrão
+  document.getElementById('p-op').addEventListener('change', (e) => {
+    const opt = e.target.selectedOptions[0];
+    if (opt && opt.dataset.tempo) document.getElementById('p-tempo').value = opt.dataset.tempo;
+  });
+}
+
+window.closeModal = () => { const b = document.getElementById('modal-backdrop'); if (b) b.remove(); };
+
+window.saveProd = async (id) => {
+  const opSel = document.getElementById('p-op');
+  const opNome = opSel.selectedOptions[0]?.dataset?.nome || opSel.selectedOptions[0]?.textContent.split('(')[0].trim() || null;
+  const body = {
+    data: document.getElementById('p-data').value,
+    costureiro_id: Number(document.getElementById('p-cost').value),
+    operacao_id: opSel.value ? Number(opSel.value) : null,
+    operacao: opNome,
+    referencia_peca: document.getElementById('p-ref').value,
+    tempo_padrao_min: Number(document.getElementById('p-tempo').value),
+    quantidade_produzida: Number(document.getElementById('p-qtd').value),
+    minutos_trabalhados: Number(document.getElementById('p-min').value),
+    retrabalho: Number(document.getElementById('p-retr').value),
+  };
+  try {
+    if (id) await api(`/api/producao/${id}`, { method: 'PUT', body });
+    else await api('/api/producao', { method: 'POST', body });
+    toast('Registro salvo', 'success');
+    closeModal();
+    state.stats = null; state.evolucao = null;
+    await navigate('producao');
+  } catch (e) { toast(e.message, 'error'); }
+};
+
+// =====================================================
+// CRUD — COSTUREIROS
+// =====================================================
+async function viewCostureiros() {
+  const costureiros = await api('/api/costureiros');
+  state.costureiros = costureiros;
+  document.getElementById('view').innerHTML = `
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h3 class="font-bold text-lg">Costureiros</h3>
+          <p class="text-sm text-slate-500">${costureiros.filter(c=>c.ativo).length} ativos · ${costureiros.length} total</p>
+        </div>
+        <button id="new-cost" class="btn btn-primary"><i class="fas fa-plus"></i> Novo Costureiro</button>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        ${costureiros.map(c => `
+          <div class="card ${!c.ativo ? 'opacity-50' : ''}">
+            <div class="flex items-start justify-between">
+              <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-full gradient-bg text-white font-bold flex items-center justify-center text-sm">${c.nome[0]}</div>
+                <div>
+                  <div class="font-semibold">${c.nome}</div>
+                  <div class="text-xs text-slate-500">${c.tipo_maquina} ${!c.ativo ? '• Inativo' : ''}</div>
+                </div>
+              </div>
+              <div class="flex gap-1">
+                <button class="btn btn-ghost p-2" onclick='editCost(${JSON.stringify(c)})'><i class="fas fa-pen text-xs"></i></button>
+                <button class="btn btn-ghost p-2 text-red-500" onclick="deleteCost(${c.id})"><i class="fas fa-trash text-xs"></i></button>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  document.getElementById('new-cost').addEventListener('click', () => openCostModal());
+}
+
+window.editCost = (c) => openCostModal(c);
+window.deleteCost = async (id) => {
+  if (!confirm('Desativar este costureiro? (soft delete — histórico preservado)')) return;
+  await api(`/api/costureiros/${id}`, { method: 'DELETE' });
+  toast('Costureiro desativado', 'success');
+  state.stats = null;
+  await navigate('costureiros');
+};
+
+function openCostModal(cost = null) {
+  const isEdit = !!cost;
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-backdrop" id="modal-backdrop">
+      <div class="modal">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+          <h3 class="font-bold text-lg">${isEdit ? 'Editar' : 'Novo'} Costureiro</h3>
+          <button class="btn btn-ghost p-2" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="p-5 space-y-3">
+          <div><label class="text-xs font-semibold text-slate-500">Nome</label>
+            <input id="c-nome" class="input" value="${cost?.nome || ''}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Tipo de Máquina</label>
+            <select id="c-tipo" class="input">
+              ${['reta','overlock','galoneira','caseadeira','travete','interloque'].map(t =>
+                `<option value="${t}" ${cost?.tipo_maquina === t ? 'selected' : ''}>${t}</option>`).join('')}
+            </select>
+          </div>
+          ${isEdit ? `<div><label class="text-xs font-semibold text-slate-500">Status</label>
+            <select id="c-ativo" class="input">
+              <option value="1" ${cost?.ativo == 1 ? 'selected' : ''}>Ativo</option>
+              <option value="0" ${cost?.ativo == 0 ? 'selected' : ''}>Inativo</option>
+            </select></div>` : ''}
+        </div>
+        <div class="p-5 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
+          <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveCost(${cost?.id || 'null'})"><i class="fas fa-save"></i> Salvar</button>
+        </div>
+      </div>
+    </div>
+  `);
+  document.getElementById('modal-backdrop').addEventListener('click', (e) => { if (e.target.id === 'modal-backdrop') closeModal(); });
+}
+
+window.saveCost = async (id) => {
+  const body = {
+    nome: document.getElementById('c-nome').value,
+    tipo_maquina: document.getElementById('c-tipo').value,
+    ativo: document.getElementById('c-ativo') ? Number(document.getElementById('c-ativo').value) : 1,
+  };
+  if (!body.nome) return toast('Nome obrigatório', 'error');
+  try {
+    if (id) await api(`/api/costureiros/${id}`, { method: 'PUT', body });
+    else await api('/api/costureiros', { method: 'POST', body });
+    toast('Salvo', 'success');
+    closeModal(); state.stats = null;
+    await navigate('costureiros');
+  } catch (e) { toast(e.message, 'error'); }
+};
+
+// =====================================================
+// CRUD — OPERAÇÕES
+// =====================================================
+async function viewOperacoes() {
+  const ops = await api('/api/operacoes');
+  state.operacoes = ops;
+  document.getElementById('view').innerHTML = `
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h3 class="font-bold text-lg">Operações</h3>
+          <p class="text-sm text-slate-500">${ops.length} operações cadastradas</p>
+        </div>
+        <button id="new-op" class="btn btn-primary"><i class="fas fa-plus"></i> Nova Operação</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase text-slate-500 border-b border-slate-200 dark:border-slate-700">
+              <th class="p-3">Operação</th>
+              <th class="p-3 text-right">Tempo Padrão (min)</th>
+              <th class="p-3 text-right">Grau Dificuldade</th>
+              <th class="p-3"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${ops.map(o => `
+              <tr class="t-row border-b border-slate-100 dark:border-slate-800">
+                <td class="p-3 font-semibold">${o.nome_operacao}</td>
+                <td class="p-3 text-right">${fmt.num(o.tempo_padrao_min, 2)}</td>
+                <td class="p-3 text-right">
+                  <span class="badge ${o.grau_dificuldade >= 1.4 ? 'badge-baixo' : o.grau_dificuldade >= 1.1 ? 'badge-medio' : 'badge-alto'}">×${o.grau_dificuldade.toFixed(2)}</span>
+                </td>
+                <td class="p-3 text-right">
+                  <button class="btn btn-ghost p-1" onclick='editOp(${JSON.stringify(o)})'><i class="fas fa-pen text-xs"></i></button>
+                  <button class="btn btn-ghost p-1 text-red-500" onclick="deleteOp(${o.id})"><i class="fas fa-trash text-xs"></i></button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  document.getElementById('new-op').addEventListener('click', () => openOpModal());
+}
+
+window.editOp = (o) => openOpModal(o);
+window.deleteOp = async (id) => {
+  if (!confirm('Desativar esta operação?')) return;
+  await api(`/api/operacoes/${id}`, { method: 'DELETE' });
+  toast('Operação desativada', 'success');
+  await navigate('operacoes');
+};
+
+function openOpModal(op = null) {
+  const isEdit = !!op;
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-backdrop" id="modal-backdrop">
+      <div class="modal">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+          <h3 class="font-bold text-lg">${isEdit ? 'Editar' : 'Nova'} Operação</h3>
+          <button class="btn btn-ghost p-2" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="p-5 space-y-3">
+          <div><label class="text-xs font-semibold text-slate-500">Nome da operação</label>
+            <input id="o-nome" class="input" value="${op?.nome_operacao || ''}"/></div>
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="text-xs font-semibold text-slate-500">Tempo padrão (min)</label>
+              <input id="o-tempo" type="number" step="0.01" class="input" value="${op?.tempo_padrao_min || ''}"/></div>
+            <div><label class="text-xs font-semibold text-slate-500">Grau dificuldade</label>
+              <input id="o-dif" type="number" step="0.1" class="input" value="${op?.grau_dificuldade || 1.0}"/></div>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800 text-xs text-slate-500">
+            <i class="fas fa-info-circle mr-1"></i>O grau de dificuldade multiplica a eficiência ponderada. Use 1.0 para operações simples e até 2.0 para muito complexas.
+          </div>
+        </div>
+        <div class="p-5 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
+          <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveOp(${op?.id || 'null'})"><i class="fas fa-save"></i> Salvar</button>
+        </div>
+      </div>
+    </div>
+  `);
+  document.getElementById('modal-backdrop').addEventListener('click', (e) => { if (e.target.id === 'modal-backdrop') closeModal(); });
+}
+
+window.saveOp = async (id) => {
+  const body = {
+    nome_operacao: document.getElementById('o-nome').value,
+    tempo_padrao_min: Number(document.getElementById('o-tempo').value),
+    grau_dificuldade: Number(document.getElementById('o-dif').value),
+  };
+  if (!body.nome_operacao) return toast('Nome obrigatório', 'error');
+  try {
+    if (id) await api(`/api/operacoes/${id}`, { method: 'PUT', body });
+    else await api('/api/operacoes', { method: 'POST', body });
+    toast('Salvo', 'success');
+    closeModal();
+    await navigate('operacoes');
+  } catch (e) { toast(e.message, 'error'); }
+};
+
+// =====================================================
+// CONFIGURAÇÕES
+// =====================================================
+async function viewConfig() {
+  const cfg = await api('/api/config');
+  state.config = cfg;
+  document.getElementById('view').innerHTML = `
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <div class="card">
+        <h3 class="font-bold text-lg mb-3"><i class="fas fa-bullseye text-brand-500 mr-2"></i>Metas de Eficiência</h3>
+        <div class="space-y-3">
+          <div><label class="text-xs font-semibold text-slate-500">Eficiência mínima (%)</label>
+            <input id="cfg-efmin" type="number" step="0.1" class="input" value="${cfg.eficiencia_minima}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Eficiência meta (%)</label>
+            <input id="cfg-efmeta" type="number" step="0.1" class="input" value="${cfg.eficiencia_meta}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Eficiência excelente (%)</label>
+            <input id="cfg-efexc" type="number" step="0.1" class="input" value="${cfg.eficiencia_excelente}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Dias úteis no mês</label>
+            <input id="cfg-dias" type="number" class="input" value="${cfg.dias_uteis_mes}"/></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3 class="font-bold text-lg mb-3"><i class="fas fa-hand-holding-dollar text-brand-500 mr-2"></i>Tabela de Bonificação</h3>
+        <div class="space-y-3">
+          <div><label class="text-xs font-semibold text-slate-500">Faixa 1 (70% - 85%)</label>
+            <input id="cfg-b1" type="number" class="input" value="${cfg.bonus_faixa_1}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Faixa 2 (85% - 100%)</label>
+            <input id="cfg-b2" type="number" class="input" value="${cfg.bonus_faixa_2}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Faixa 3 (100% - 115%)</label>
+            <input id="cfg-b3" type="number" class="input" value="${cfg.bonus_faixa_3}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Faixa 4 (acima de 115%)</label>
+            <input id="cfg-b4" type="number" class="input" value="${cfg.bonus_faixa_4}"/></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3 class="font-bold text-lg mb-3"><i class="fas fa-shield-halved text-brand-500 mr-2"></i>Requisitos de Qualificação</h3>
+        <div class="space-y-3">
+          <div><label class="text-xs font-semibold text-slate-500">Frequência mínima (%)</label>
+            <input id="cfg-freq" type="number" step="0.1" class="input" value="${cfg.frequencia_minima}"/></div>
+          <div><label class="text-xs font-semibold text-slate-500">Retrabalho máximo (peças)</label>
+            <input id="cfg-retr" type="number" class="input" value="${cfg.retrabalho_limite}"/></div>
+          <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 text-xs">
+            <i class="fas fa-triangle-exclamation text-amber-600 mr-1"></i>
+            Costureiros com frequência abaixo do mínimo OU retrabalho acima do limite perdem o bônus, mesmo com eficiência alta.
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3 class="font-bold text-lg mb-3"><i class="fas fa-book text-brand-500 mr-2"></i>Como funciona o cálculo</h3>
+        <div class="space-y-3 text-sm">
+          <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800">
+            <div class="font-semibold mb-1">Eficiência</div>
+            <code class="text-xs">(tempo_padrão × qtd_produzida) / min_trabalhados × 100</code>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800">
+            <div class="font-semibold mb-1">Eficiência Ponderada</div>
+            <code class="text-xs">Σ(tempo × qtd × dificuldade) / Σ(min_trab) × 100</code>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800">
+            <div class="font-semibold mb-1">Frequência</div>
+            <code class="text-xs">dias_trabalhados / dias_úteis × 100</code>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800">
+            <div class="font-semibold mb-1">Qualidade</div>
+            <code class="text-xs">100 - (retrabalho / produção × 100)</code>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="mt-5 flex justify-end gap-2 no-print">
+      <button id="cfg-save" class="btn btn-primary"><i class="fas fa-save"></i> Salvar Configurações</button>
+    </div>
+  `;
+
+  document.getElementById('cfg-save').addEventListener('click', async () => {
+    const body = {
+      eficiencia_minima: Number(document.getElementById('cfg-efmin').value),
+      eficiencia_meta: Number(document.getElementById('cfg-efmeta').value),
+      eficiencia_excelente: Number(document.getElementById('cfg-efexc').value),
+      dias_uteis_mes: Number(document.getElementById('cfg-dias').value),
+      bonus_faixa_1: Number(document.getElementById('cfg-b1').value),
+      bonus_faixa_2: Number(document.getElementById('cfg-b2').value),
+      bonus_faixa_3: Number(document.getElementById('cfg-b3').value),
+      bonus_faixa_4: Number(document.getElementById('cfg-b4').value),
+      frequencia_minima: Number(document.getElementById('cfg-freq').value),
+      retrabalho_limite: Number(document.getElementById('cfg-retr').value),
+    };
+    try {
+      await api('/api/config', { method: 'PUT', body });
+      toast('Configurações salvas!', 'success');
+      state.stats = null;
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+// =====================================================
+// BOOT
+// =====================================================
+function bootChartJs() {
+  if (window.Chart) return Promise.resolve();
+  return new Promise((res) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js';
+    s.onload = res;
+    document.head.appendChild(s);
+  });
+}
+
+(async function () {
+  await bootChartJs();
+  renderLayout();
+  await navigate('overview');
+})();
