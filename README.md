@@ -2,177 +2,152 @@
 
 ## Visão Geral do Projeto
 - **Nome**: ConfecSystem
-- **Objetivo**: Substituir planilhas manuais por um SaaS centralizado que controla produtividade, eficiência, qualidade e bonificação mensal dos costureiros de uma confecção.
+- **Objetivo**: Substituir planilhas manuais por um SaaS centralizado (multi-tenant) que controla produtividade, eficiência, qualidade e bonificação mensal dos costureiros de uma confecção.
 - **Funcionalidades principais**:
+  - Autenticação JWT multi-usuário com RBAC (admin/gestor/operador/viewer)
+  - Arquitetura SaaS multi-tenant (cada confecção com dados isolados)
   - Dashboard executivo com KPIs e evolução diária
   - Ranking automático de costureiros por eficiência
   - Perfil individual com histórico de 6 meses e produção diária
   - Controle de bonificação com simulação de cenários
   - Cadastros completos (costureiros, operações, produção)
   - Configurações de metas, faixas de bônus e regras de qualificação
-  - Modo claro/escuro
-  - Exportação CSV/PDF (impressão nativa)
+  - **Importador de Excel** (arrasta a planilha `BONIFICAÇAO MENSAL.xlsx` e migra dados antigos)
+  - Modo claro/escuro, gráficos interativos (Chart.js)
+  - Exportação CSV/PDF (impressão nativa do navegador)
 
-## URLs Ativas
-- **Aplicação (sandbox)**: https://3000-iq2q3bvj6paht3vi318kn-5185f4aa.sandbox.novita.ai
-- **Health check**: `/api/health`
-- **GitHub**: (não publicado ainda)
+## 🌐 URLs em Produção
+- **Aplicação (Cloudflare Pages)**: https://confecsystem-eficiencia.pages.dev
+- **Deploy atual**: https://47d17129.confecsystem-eficiencia.pages.dev
+- **Health check**: https://confecsystem-eficiencia.pages.dev/api/health
+- **Sandbox dev**: https://3000-iq2q3bvj6paht3vi318kn-5185f4aa.sandbox.novita.ai
+- **GitHub**: https://github.com/playsurf001/eficiencia-bonus
 
-## Telas (Frontend SPA)
-| Rota (SPA) | Descrição |
-|---|---|
-| `overview` | Visão geral: KPIs, evolução, top 5 e atenção necessária |
-| `ranking` | Ranking completo filtrável por classe e busca por nome |
-| `perfil` | Perfil individual com gráficos diário + histórico e lista de produções |
-| `bonus` | Folha de bonificação + simulador de cenários + exportação CSV |
-| `producao` | CRUD de registros de produção |
-| `costureiros` | CRUD de costureiros |
-| `operacoes` | CRUD de operações (com grau de dificuldade) |
-| `config` | Ajuste de metas, faixas de bônus e regras de qualificação |
+## 🔐 Usuários Demo (senha: `demo123`)
+| E-mail                | Papel     | Permissões                                    |
+| --------------------- | --------- | --------------------------------------------- |
+| `admin@demo.com`      | admin     | Tudo (usuários, configurações, importação)    |
+| `gestor@demo.com`     | gestor    | Configurações, importação, cadastros, dados   |
+| `operador@demo.com`   | operador  | Lançamentos de produção                       |
 
-## API (REST)
+> ⚠️ **Importante**: troque as senhas em produção e gere um novo `JWT_SECRET` via `wrangler pages secret put JWT_SECRET --project-name confecsystem-eficiencia`.
 
-### Health & Config
-| Método | Endpoint | Descrição |
-|---|---|---|
-| GET | `/api/health` | Status do servidor |
-| GET | `/api/config` | Obtém metas e faixas de bônus |
-| PUT | `/api/config` | Atualiza configurações globais |
+## 🧭 Principais endpoints da API
 
-### Costureiros
-| Método | Endpoint | Descrição |
-|---|---|---|
-| GET | `/api/costureiros` | Lista todos |
-| POST | `/api/costureiros` | Cria novo `{nome, tipo_maquina}` |
-| PUT | `/api/costureiros/:id` | Atualiza |
-| DELETE | `/api/costureiros/:id` | Soft delete (preserva histórico) |
+### Autenticação (público / autenticado)
+| Método | Rota                 | Descrição                                              |
+| ------ | -------------------- | ------------------------------------------------------ |
+| POST   | `/api/auth/login`    | `{email, senha}` → `{token, user}` (seta cookie também) |
+| POST   | `/api/auth/logout`   | Revoga sessão atual                                    |
+| GET    | `/api/auth/me`       | Retorna usuário autenticado (cookie ou Bearer)         |
+| POST   | `/api/auth/register` | **admin** cria usuário (outro admin/gestor/operador)   |
+| GET    | `/api/usuarios`      | **admin** lista usuários da empresa                    |
 
-### Operações
-| Método | Endpoint | Descrição |
-|---|---|---|
-| GET | `/api/operacoes` | Lista operações ativas |
-| POST | `/api/operacoes` | Cria `{nome_operacao, grau_dificuldade, tempo_padrao_min}` |
-| PUT | `/api/operacoes/:id` | Atualiza |
-| DELETE | `/api/operacoes/:id` | Desativa |
+### Importador Excel
+| Método | Rota                               | Descrição                                                                      |
+| ------ | ---------------------------------- | ------------------------------------------------------------------------------ |
+| POST   | `/api/import/xlsx?dryRun=true`     | **admin/gestor** Sobe `multipart file=@...xlsx` e retorna análise sem gravar   |
+| POST   | `/api/import/xlsx`                 | **admin/gestor** Grava costureiros, operações e produção no banco              |
 
-### Produção
-| Método | Endpoint | Descrição |
-|---|---|---|
-| GET | `/api/producao?inicio=&fim=&costureiro_id=` | Lista com filtros |
-| POST | `/api/producao` | Novo registro |
-| PUT | `/api/producao/:id` | Atualiza |
-| DELETE | `/api/producao/:id` | Remove |
+O importador reconhece automaticamente o formato da planilha `BONIFICAÇAO MENSAL.xlsx` (cabeçalho em `C3`, aba por costureiro ou aba única), cria costureiros/operações novos, e opcionalmente substitui dados do mês.
 
-### Estatísticas (coração do sistema)
-| Método | Endpoint | Descrição |
-|---|---|---|
-| GET | `/api/stats?ano=&mes=` | KPIs + lista de costureiros consolidada |
-| GET | `/api/stats/evolucao?ano=&mes=` | Série diária (produção e eficiência) |
-| GET | `/api/stats/costureiro/:id?ano=&mes=` | Perfil completo com histórico 6m |
-| POST | `/api/simulacao` | Simula bônus com configurações diferentes |
+### Dados / Relatórios (público somente leitura hoje; pode virar autenticado)
+| Método | Rota                           | Descrição                                                      |
+| ------ | ------------------------------ | -------------------------------------------------------------- |
+| GET    | `/api/stats?ano=2026&mes=10`   | KPIs agregados do período                                      |
+| GET    | `/api/stats/costureiro/:id`    | Estatísticas individuais (diário + histórico 6 meses)          |
+| GET    | `/api/costureiros`             | Lista costureiros                                              |
+| POST   | `/api/costureiros`             | **admin/gestor** cria costureiro                               |
+| PUT    | `/api/costureiros/:id`         | **admin/gestor** atualiza                                      |
+| DELETE | `/api/costureiros/:id`         | **admin** exclui                                               |
+| GET    | `/api/operacoes`               | Catálogo de operações                                          |
+| POST   | `/api/operacoes`               | **admin/gestor**                                               |
+| GET    | `/api/producao`                | Lista produção (filtros: inicio, fim, costureiro_id)           |
+| POST   | `/api/producao`                | **admin/gestor/operador** lança produção                       |
+| POST   | `/api/simulacao`               | Simulação "what-if" de cenários de bonificação                 |
+| GET    | `/api/config`                  | Configuração atual (metas, bônus, limites)                     |
+| PUT    | `/api/config`                  | **admin/gestor** atualiza configuração                         |
 
-## Arquitetura de Dados
+Ex.:
+```bash
+# Login
+TOKEN=$(curl -s -X POST https://confecsystem-eficiencia.pages.dev/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@demo.com","senha":"demo123"}' | jq -r .token)
 
-### Modelos (tabelas D1)
-- **empresas** — multi-tenant (id, nome, cnpj, ativo)
-- **costureiros** — id, empresa_id, nome, tipo_maquina (reta/overlock/galoneira/caseadeira/travete), ativo
-- **operacoes** — id, nome_operacao, grau_dificuldade, tempo_padrao_min, ativo
-- **producao** — data, costureiro_id, operacao_id, referencia_peca, tempo_padrao_min, quantidade_produzida, minutos_trabalhados, retrabalho
-- **metas_config** — eficiência (mín/meta/excelente), 4 faixas de bônus, frequência mín, retrabalho limite, dias úteis
-
-### Serviços de Armazenamento
-- **Cloudflare D1** (SQLite distribuído): banco principal do sistema
-- Arquitetura pronta para **KV** (cache) e **R2** (exportações) no futuro
-
-### Fluxo de Dados
-```
-Produção diária → D1 (INSERT) → /api/stats (agregação SQL) → Consolidador (business.ts) → Frontend (Chart.js + Tailwind)
+# Importar Excel
+curl -X POST "https://confecsystem-eficiencia.pages.dev/api/import/xlsx?dryRun=true" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@BONIFICAÇAO MENSAL.xlsx"
 ```
 
-## Regras de Negócio Implementadas
+## 🗄️ Arquitetura de Dados (Cloudflare D1 / SQLite)
+- **empresas** (multi-tenant): `id, nome, plano, ativo`
+- **usuarios**: `id, empresa_id, email, senha_hash (PBKDF2), nome, role, ativo, ultimo_login`
+- **sessoes**: `id, usuario_id, jti, expires_at, revoked` (lista de revogação para JWT)
+- **costureiros**: `id, empresa_id, nome, tipo_maquina, ativo, data_admissao`
+- **operacoes**: `id, empresa_id, nome_operacao, grau_dificuldade`
+- **producao**: `id, empresa_id, data, costureiro_id, operacao_id, referencia_peca, tempo_padrao_min, quantidade_produzida, minutos_trabalhados, retrabalho`
+- **metas_config**: `empresa_id, eficiencia_minima/meta/excelente, bonus_faixa_1..4, frequencia_minima, retrabalho_limite, dias_uteis_mes, minutos_dia_util`
+- **auditoria**: `usuario_id, empresa_id, acao, entidade, detalhes, ip, user_agent, created_at`
 
-### Fórmulas
-```
-Eficiência = (Σ quantidade × tempo_padrão) / Σ minutos_trabalhados × 100
-Ef. Ponderada = (Σ quantidade × tempo_padrão × dificuldade) / Σ minutos_trabalhados × 100
-Frequência = dias_trabalhados / dias_úteis_mês × 100
-Qualidade = 100 - (retrabalho_total / produção_total × 100)
-```
+Dados em produção: **42 costureiros**, **1.315 lançamentos** (outubro/2026), **15 operações**, **3 usuários demo**, **1 empresa seed**.
 
-### Tabela de Bônus (configurável)
-| Eficiência | Bônus Padrão |
-|---|---|
-| < 70% | R$ 0 |
-| 70% – 85% | R$ 100 |
-| 85% – 100% | R$ 250 |
-| 100% – 115% | R$ 400 |
-| > 115% | R$ 600 |
+## 🧮 Regras de Negócio
+- **Eficiência**: `(tempo_padrao × quantidade) / minutos_trabalhados × 100`
+- **Eficiência ponderada**: `eficiência × grau_dificuldade`
+- **Frequência**: `dias_trabalhados / dias_úteis` — precisa `> 90%`
+- **Qualidade**: total de `retrabalho` no mês deve ser `≤ retrabalho_limite`
+- **Tabela de bonificação** (só paga se frequência ≥ 90% e retrabalho OK):
+  - `< 70%` → R$ 0
+  - `70%–85%` → R$ 100
+  - `85%–100%` → R$ 250
+  - `100%–115%` → R$ 400
+  - `> 115%` → R$ 600
 
-### Bloqueios (obrigatórios)
-- Frequência < 90% → bônus zerado
-- Retrabalho acima do limite → bônus zerado
-- O motivo do bloqueio é exibido em todas as telas
+## 🚀 Deploy
 
-## Dados Iniciais (Seed)
-- **42 costureiros** importados da planilha `BONIFICAÇAO MENSAL.xlsx` (todos os nomes reais: ADEMILSON, ADENALDO, EDSON, MONIQUE, ROSENILDO, etc.)
-- **15 operações típicas** de confecção com tempos e dificuldades
-- **1.315 registros de produção** gerados para outubro/2026, respeitando as eficiências reais da planilha por costureiro
+### Produção (Cloudflare Pages + D1)
+```bash
+cd /home/user/webapp
+npm run build
+npx wrangler pages deploy dist --project-name confecsystem-eficiencia --branch main
 
-## Guia Rápido de Uso
-1. Acesse a URL da aplicação
-2. Abra **Visão Geral** — veja os KPIs do mês corrente
-3. Use os seletores de **Mês/Ano** no topo para navegar no tempo
-4. Vá em **Ranking** para ordenar por eficiência e clicar em cada costureiro
-5. Em **Perfil Individual**, veja desempenho diário e histórico de 6 meses
-6. **Bonificação** mostra folha final; use o simulador para testar outras faixas
-7. **Configurações** permite ajustar metas, bônus e regras
-8. Botão **PDF** (no topo) imprime/exporta qualquer tela
-9. Alterne entre modo claro/escuro pelo botão da sidebar
+# Secrets
+npx wrangler pages secret put JWT_SECRET --project-name confecsystem-eficiencia
 
-## Status do Deploy
-- **Plataforma**: Cloudflare Pages + D1 (local, pronto para produção)
-- **Status**: ✅ Ativo localmente (PM2)
-- **Tech Stack**:
-  - Backend: **Hono** (Cloudflare Workers)
-  - Banco: **Cloudflare D1** (SQLite distribuído)
-  - Build: **Vite** + `@hono/vite-build/cloudflare-pages`
-  - Frontend: **Vanilla JS SPA** + Tailwind (CDN) + Chart.js + FontAwesome
-  - Processo: **PM2** com wrangler pages dev
-- **Última atualização**: 2026-04-23
-
-## Estrutura de Arquivos
-```
-webapp/
-├── migrations/0001_initial_schema.sql   # Schema D1
-├── seed.sql                              # 42 costureiros + 1315 produções
-├── src/
-│   ├── index.tsx                         # Hono + rotas API
-│   ├── business.ts                       # Regras de negócio (cálculos)
-│   ├── types.ts                          # Tipos TypeScript
-│   └── renderer.tsx                      # HTML shell + tema
-├── public/static/
-│   ├── app.js                            # SPA completa (~1600 linhas)
-│   └── style.css                         # Estilos customizados
-├── ecosystem.config.cjs                  # PM2 com wrangler D1
-├── wrangler.jsonc                        # Config Cloudflare Pages
-└── vite.config.ts                        # Build Hono
+# Migrações
+npx wrangler d1 execute confecsystem-production --remote --file=./migrations/0001_initial_schema.sql
+npx wrangler d1 execute confecsystem-production --remote --file=./migrations/0002_auth_multi_tenant.sql
+npx wrangler d1 execute confecsystem-production --remote --file=./seed.sql
+npx wrangler d1 execute confecsystem-production --remote --file=./seed-users.sql
 ```
 
-## Funcionalidades Ainda Não Implementadas (Roadmap)
-1. **Autenticação multiusuário** (JWT) — estrutura multi-empresa já existe no banco
-2. **Upload de planilha Excel** para importação em massa
-3. **Notificações automáticas** (WhatsApp/email) para metas atingidas
-4. **Relatórios PDF customizados** com template branded
-5. **API pública** com tokens para integração ERP
-6. **Previsão de produção** com regressão linear/sazonalidade
-7. **Gamificação** — badges, desafios semanais
-8. **App mobile PWA** para supervisores apontarem produção no chão-de-fábrica
-9. **Detalhamento por referência de peça** (qual modelo rende mais)
-10. **Análise de causa-raiz** do retrabalho por costureiro/operação
+### Desenvolvimento local (sandbox)
+```bash
+cd /home/user/webapp
+npm run build
+pm2 start ecosystem.config.cjs
+# URL: http://localhost:3000
+```
 
-## Próximos Passos Recomendados
-1. **Subir ao Cloudflare Pages** (setup_cloudflare_api_key + deploy produção)
-2. **Criar D1 remoto** (`wrangler d1 create webapp-production`) e aplicar migrations
-3. **Adicionar importador XLSX** (endpoint `POST /api/import/xlsx`) para retroalimentar de planilhas existentes
-4. **Login com Cloudflare Access** para ativar multi-empresa real
-5. **Cronjob mensal** via Worker Scheduler para fechamento automático
+## 🎯 Stack técnica
+- **Backend**: Hono 4.12 (TypeScript) sobre Cloudflare Workers, JWT (`hono/jwt` HS256), Web Crypto (PBKDF2) para senhas
+- **Banco**: Cloudflare D1 (SQLite distribuído)
+- **Frontend**: SPA Vanilla JS + TailwindCSS (CDN) + Chart.js + FontAwesome
+- **Build**: Vite + `@hono/vite-build` + Wrangler 4.82
+- **Dev**: PM2 (processo daemon) + Wrangler Pages Dev
+
+## 📌 Status
+- **Plataforma**: Cloudflare Pages
+- **Status**: ✅ Ativo em produção (https://confecsystem-eficiencia.pages.dev)
+- **Última atualização**: 23/04/2026
+- **Deploy ID**: 47d17129
+
+## 🛠️ Próximos passos sugeridos
+1. Tornar `/api/stats`, `/api/costureiros` etc. também protegidos (hoje são leitura pública p/ facilitar demo) ativando `authMiddleware` em todas as rotas
+2. Adicionar tela de administração de usuários no frontend (já existe o backend)
+3. Habilitar Cloudflare Turnstile no login (anti-bot)
+4. Publicar Tailwind via build em vez do CDN para eliminar o warning
+5. Enviar notificações mensais (email/Slack) com o relatório de bonificação
+6. Criar página pública de convite de novos usuários com token
