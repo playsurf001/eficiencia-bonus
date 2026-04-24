@@ -1,11 +1,12 @@
 {
-  "name": "webapp",
+  "name": "corepro-eficiencia",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && npm run copy:public",
+    "copy:public": "mkdir -p dist && cp -rn public/* dist/ 2>/dev/null || cp -r public/* dist/",
     "preview": "wrangler pages dev",
-    "deploy": "npm run build && wrangler pages deploy",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name corepro-eficiencia --branch main",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {

@@ -1,12 +1,41 @@
 /* =====================================================
-   ConfecSystem — Styles
+   CorePro Eficiência — Styles
    ===================================================== */
 
 :root {
-  --brand-50: #eef4ff;
-  --brand-500: #3a62fb;
-  --brand-600: #2442f0;
-  --brand-700: #1e33d8;
+  --brand-50:  #eefaff;
+  --brand-100: #d9f2fc;
+  --brand-200: #bce7f8;
+  --brand-300: #8fd6f2;
+  --brand-400: #58bde3;
+  --brand-500: #2ea2cc;
+  --brand-600: #1f83ad;
+  --brand-700: #1b6b8e;
+  --brand-800: #1a5773;
+  --brand-900: #194960;
+  --brand-950: #0b2a33;
+  --accent-500: #e53e24;
+  --accent-600: #c42e17;
+}
+
+/* Logo helpers — alterna entre versão light e dark */
+.logo-horizontal {
+  display: inline-block;
+  height: 40px;
+  width: auto;
+  object-fit: contain;
+  user-select: none;
+}
+.logo-horizontal.light-only { display: inline-block; }
+.logo-horizontal.dark-only  { display: none; }
+.dark .logo-horizontal.light-only { display: none; }
+.dark .logo-horizontal.dark-only  { display: inline-block; }
+
+.logo-icon {
+  height: 32px;
+  width: 32px;
+  object-fit: contain;
+  user-select: none;
 }
 
 * {
@@ -25,9 +54,9 @@ html, body {
 ::-webkit-scrollbar-thumb:hover { background: rgba(148, 163, 184, 0.6); }
 .dark ::-webkit-scrollbar-thumb { background: rgba(71, 85, 105, 0.6); }
 
-/* Gradiente de topo animado */
+/* Gradiente de topo animado (identidade CorePro: teal + accent laranja) */
 .gradient-bg {
-  background: linear-gradient(135deg, #3a62fb 0%, #7c3aed 50%, #ec4899 100%);
+  background: linear-gradient(135deg, #1b6b8e 0%, #2ea2cc 45%, #e53e24 100%);
   background-size: 200% 200%;
   animation: gradient-move 12s ease infinite;
 }
@@ -43,7 +72,7 @@ html, body {
 }
 .kpi-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 10px 30px -10px rgba(58, 98, 251, 0.25);
+  box-shadow: 0 10px 30px -10px rgba(46, 162, 204, 0.35);
 }
 
 /* Progress bar custom */
@@ -95,31 +124,31 @@ html, body {
   cursor: pointer;
 }
 .nav-item:hover {
-  background: rgba(58, 98, 251, 0.08);
-  color: var(--brand-600);
+  background: rgba(46, 162, 204, 0.10);
+  color: var(--brand-700);
 }
 .nav-item.active {
-  background: linear-gradient(135deg, #3a62fb, #2442f0);
+  background: linear-gradient(135deg, #1f83ad, #1b6b8e);
   color: white;
-  box-shadow: 0 6px 16px -6px rgba(58, 98, 251, 0.6);
+  box-shadow: 0 6px 16px -6px rgba(31, 131, 173, 0.6);
 }
 .dark .nav-item { color: rgb(148 163 184); }
-.dark .nav-item:hover { background: rgba(58, 98, 251, 0.12); color: #93b3ff; }
+.dark .nav-item:hover { background: rgba(46, 162, 204, 0.15); color: #8fd6f2; }
 
 /* Tabelas */
 .t-row {
   transition: background .15s ease;
 }
 .t-row:hover {
-  background: rgba(58, 98, 251, 0.04);
+  background: rgba(46, 162, 204, 0.06);
 }
-.dark .t-row:hover { background: rgba(58, 98, 251, 0.08); }
+.dark .t-row:hover { background: rgba(46, 162, 204, 0.10); }
 
 /* Loader */
 .loader {
   width: 32px;
   height: 32px;
-  border: 3px solid rgba(58, 98, 251, 0.15);
+  border: 3px solid rgba(46, 162, 204, 0.18);
   border-top-color: var(--brand-500);
   border-radius: 50%;
   animation: spin .8s linear infinite;
@@ -135,10 +164,16 @@ html, body {
 
 /* Print otimizado para PDF */
 @media print {
-  .no-print { display: none !important; }
+  @page { size: A4; margin: 14mm 10mm; }
+  .no-print, #app-splash, aside#sidebar, #mobile-menu, header.sticky { display: none !important; }
   body { background: white !important; color: black !important; }
-  .card { box-shadow: none !important; border: 1px solid #e5e7eb !important; }
+  main { display: block !important; }
+  .card { box-shadow: none !important; border: 1px solid #e5e7eb !important; page-break-inside: avoid; }
   .page-break { page-break-after: always; }
+  .print\:flex { display: flex !important; }
+  .print\:hidden { display: none !important; }
+  /* Força logo imprimível mesmo com filtros */
+  img { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 }
 
 /* Inputs consistentes em ambos temas */
@@ -155,7 +190,7 @@ html, body {
 .input:focus {
   outline: none;
   border-color: var(--brand-500);
-  box-shadow: 0 0 0 3px rgba(58, 98, 251, 0.15);
+  box-shadow: 0 0 0 3px rgba(46, 162, 204, 0.20);
 }
 .dark .input {
   background: rgb(15 23 42);
@@ -177,11 +212,17 @@ html, body {
   border: none;
 }
 .btn-primary {
-  background: linear-gradient(135deg, #3a62fb, #2442f0);
+  background: linear-gradient(135deg, #1f83ad, #1b6b8e);
   color: white;
-  box-shadow: 0 4px 12px -4px rgba(58, 98, 251, 0.5);
+  box-shadow: 0 4px 12px -4px rgba(31, 131, 173, 0.55);
 }
-.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 20px -6px rgba(58, 98, 251, 0.6); }
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 20px -6px rgba(31, 131, 173, 0.65); }
+.btn-accent {
+  background: linear-gradient(135deg, #e53e24, #c42e17);
+  color: white;
+  box-shadow: 0 4px 12px -4px rgba(229, 62, 36, 0.55);
+}
+.btn-accent:hover { transform: translateY(-1px); box-shadow: 0 8px 20px -6px rgba(229, 62, 36, 0.65); }
 .btn-secondary {
   background: rgb(241 245 249);
   color: rgb(51 65 85);

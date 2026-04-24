@@ -1,6 +1,7 @@
 /* =====================================================
- *  ConfecSystem — SPA Frontend
+ *  CorePro Eficiência — SPA Frontend
  *  Gestão de Produção e Bonificação Mensal
+ *  "Onde sistemas se tornam negócio"
  * ===================================================== */
 
 // ---------- Estado global ----------
@@ -118,12 +119,10 @@ function renderLayout() {
       <aside id="sidebar" class="hidden md:flex flex-col w-64 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 sticky top-0 h-screen">
         <div class="p-5 border-b border-slate-200 dark:border-slate-800">
           <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl gradient-bg flex items-center justify-center text-white">
-              <i class="fas fa-scissors"></i>
-            </div>
+            <img src="/static/brand/icon-192.png" alt="CorePro" class="logo-icon w-10 h-10 rounded-xl shadow-sm" />
             <div>
-              <div class="font-bold text-slate-900 dark:text-white">ConfecSystem</div>
-              <div class="text-[11px] text-slate-500">Gestão Inteligente</div>
+              <div class="font-bold text-slate-900 dark:text-white leading-tight">CorePro <span class="text-accent-500" style="color:#e53e24">Eficiência</span></div>
+              <div class="text-[11px] text-slate-500">Onde sistemas se tornam negócio</div>
             </div>
           </div>
         </div>
@@ -169,6 +168,7 @@ function renderLayout() {
         <header class="sticky top-0 z-20 bg-white/80 dark:bg-slate-900/80 backdrop-blur border-b border-slate-200 dark:border-slate-800">
           <div class="flex items-center gap-3 px-5 py-3">
             <button id="mobile-menu" class="md:hidden btn btn-ghost p-2"><i class="fas fa-bars"></i></button>
+            <img src="/static/brand/icon-192.png" alt="CorePro" class="md:hidden w-8 h-8 rounded-lg" />
             <h1 id="page-title" class="font-bold text-lg md:text-xl">Visão Geral</h1>
             <div class="flex-1"></div>
             <div class="flex items-center gap-2 no-print">
@@ -180,6 +180,14 @@ function renderLayout() {
             </div>
           </div>
         </header>
+        <!-- Print header (só aparece no PDF) -->
+        <div class="hidden print:flex items-center gap-4 px-8 py-4 border-b-2" style="border-color:#1f83ad">
+          <img src="/static/brand/icon-192.png" alt="CorePro" style="width:56px;height:56px" />
+          <div>
+            <div style="font-size:22px;font-weight:800;color:#194960">CorePro Eficiência</div>
+            <div style="font-size:11px;color:#64748b">Relatório gerado em <span id="print-date"></span> — Onde sistemas se tornam negócio</div>
+          </div>
+        </div>
 
         <div id="view" class="p-5 md:p-6 fade-in"></div>
       </main>
@@ -244,7 +252,12 @@ function renderLayout() {
   updateThemeLabel();
 
   // Print
-  document.getElementById('print-btn').addEventListener('click', () => window.print());
+  document.getElementById('print-btn').addEventListener('click', () => {
+    const d = new Date();
+    const dateEl = document.getElementById('print-date');
+    if (dateEl) dateEl.textContent = d.toLocaleString('pt-BR');
+    window.print();
+  });
 }
 
 function toggleTheme() {
@@ -329,11 +342,12 @@ function renderLogin() {
     <div class="min-h-screen flex items-center justify-center p-4 bg-slate-50 dark:bg-slate-950">
       <div class="max-w-md w-full">
         <div class="text-center mb-6">
-          <div class="w-16 h-16 mx-auto rounded-2xl gradient-bg flex items-center justify-center text-white text-3xl shadow-lg">
-            <i class="fas fa-scissors"></i>
-          </div>
-          <h1 class="text-3xl font-extrabold mt-4">ConfecSystem</h1>
+          <img src="/static/brand/icon-192.png" alt="CorePro Eficiência" width="96" height="96" class="mx-auto rounded-2xl shadow-xl" />
+          <h1 class="text-3xl font-extrabold mt-4">
+            CorePro <span style="background:linear-gradient(90deg,#c42e17,#e53e24,#f97316);-webkit-background-clip:text;background-clip:text;color:transparent;">Eficiência</span>
+          </h1>
           <p class="text-slate-500 text-sm">Gestão Inteligente de Produção e Bonificação</p>
+          <p class="text-xs text-slate-400 mt-1 italic">Onde sistemas se tornam negócio</p>
         </div>
         <div class="card">
           <div class="flex gap-2 mb-5">
@@ -736,8 +750,8 @@ function chartColors() {
   return {
     grid: dark ? 'rgba(148,163,184,0.12)' : 'rgba(15,23,42,0.08)',
     text: dark ? '#cbd5e1' : '#334155',
-    brand: '#3a62fb',
-    brand2: '#7c3aed',
+    brand: '#2ea2cc',
+    brand2: '#e53e24',
     green: '#10b981',
     amber: '#f59e0b',
     red: '#ef4444',
@@ -1867,8 +1881,19 @@ async function loadCurrentUser() {
   } catch {}
 }
 
+function hideSplash() {
+  const sp = document.getElementById('app-splash');
+  if (!sp) return;
+  sp.style.opacity = '0';
+  setTimeout(() => sp.remove(), 500);
+}
+
 (async function () {
-  await Promise.all([bootChartJs(), loadCurrentUser()]);
-  renderLayout();
-  await navigate('overview');
+  try {
+    await Promise.all([bootChartJs(), loadCurrentUser()]);
+    renderLayout();
+    await navigate('overview');
+  } finally {
+    hideSplash();
+  }
 })();

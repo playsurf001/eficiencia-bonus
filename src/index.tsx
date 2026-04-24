@@ -649,15 +649,24 @@ app.delete('/api/usuarios/:id', authMiddleware, requireRole('admin'), async (c) 
 })
 
 /* =============================================================
- *  PÁGINA ÚNICA (SPA)
+ *  PÁGINA ÚNICA (SPA) — catch-all para fallback
  * ============================================================= */
-app.get('/', (c) => {
+const renderSpa = (c: any) => {
   return c.render(
     <>
       <div id="app" class="min-h-screen"></div>
       <script src="/static/app.js"></script>
     </>
   )
+}
+
+app.get('/', renderSpa)
+// Fallback SPA: qualquer rota não-API e não-estática renderiza o index
+app.get('*', async (c, next) => {
+  const path = c.req.path
+  // deixa API e estáticos passarem normalmente
+  if (path.startsWith('/api/') || path.startsWith('/static/')) return next()
+  return renderSpa(c)
 })
 
 export default app
