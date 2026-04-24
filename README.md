@@ -1,7 +1,9 @@
-# ConfecSystem — Gestão de Produção e Bonificação Mensal
+# CorePro Eficiência — Gestão de Produção e Bonificação Mensal
+
+> *Onde sistemas se tornam negócio*
 
 ## Visão Geral do Projeto
-- **Nome**: ConfecSystem
+- **Nome**: CorePro Eficiência
 - **Objetivo**: Substituir planilhas manuais por um SaaS centralizado (multi-tenant) que controla produtividade, eficiência, qualidade e bonificação mensal dos costureiros de uma confecção.
 - **Funcionalidades principais**:
   - Autenticação JWT multi-usuário com RBAC (admin/gestor/operador/viewer)
@@ -17,11 +19,19 @@
   - Exportação CSV/PDF (impressão nativa do navegador)
 
 ## 🌐 URLs em Produção
-- **Aplicação (Cloudflare Pages)**: https://confecsystem-eficiencia.pages.dev
-- **Deploy atual**: https://47d17129.confecsystem-eficiencia.pages.dev
-- **Health check**: https://confecsystem-eficiencia.pages.dev/api/health
+- **🎯 Domínio fixo**: https://corepro-eficiencia.pages.dev
+- **Health check**: https://corepro-eficiencia.pages.dev/api/health
 - **Sandbox dev**: https://3000-iq2q3bvj6paht3vi318kn-5185f4aa.sandbox.novita.ai
 - **GitHub**: https://github.com/playsurf001/eficiencia-bonus
+
+## 🎨 Identidade Visual
+- **Logo principal**: `/static/brand/icon-192.png` (ícone hexagonal com circuitos)
+- **Logo horizontal**: `/static/brand/corepro-horizontal.png`
+- **Favicon**: `/static/brand/favicon.ico` (16/32/48px)
+- **Apple touch**: `/static/brand/apple-touch-icon.png` (180px)
+- **PWA manifest**: `/static/manifest.webmanifest`
+- **OG image**: `/static/brand/og-image.png` (1200x630)
+- **Paleta**: teal `#0f768f`/`#2ea2cc` + accent laranja `#e53e24`
 
 ## 🔐 Usuários Demo (senha: `demo123`)
 | E-mail                | Papel     | Permissões                                    |
@@ -71,12 +81,12 @@ O importador reconhece automaticamente o formato da planilha `BONIFICAÇAO MENSA
 Ex.:
 ```bash
 # Login
-TOKEN=$(curl -s -X POST https://confecsystem-eficiencia.pages.dev/api/auth/login \
+TOKEN=$(curl -s -X POST https://corepro-eficiencia.pages.dev/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@demo.com","senha":"demo123"}' | jq -r .token)
 
 # Importar Excel
-curl -X POST "https://confecsystem-eficiencia.pages.dev/api/import/xlsx?dryRun=true" \
+curl -X POST "https://corepro-eficiencia.pages.dev/api/import/xlsx?dryRun=true" \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@BONIFICAÇAO MENSAL.xlsx"
 ```
@@ -117,10 +127,10 @@ npx wrangler pages deploy dist --project-name confecsystem-eficiencia --branch m
 npx wrangler pages secret put JWT_SECRET --project-name confecsystem-eficiencia
 
 # Migrações
-npx wrangler d1 execute confecsystem-production --remote --file=./migrations/0001_initial_schema.sql
-npx wrangler d1 execute confecsystem-production --remote --file=./migrations/0002_auth_multi_tenant.sql
-npx wrangler d1 execute confecsystem-production --remote --file=./seed.sql
-npx wrangler d1 execute confecsystem-production --remote --file=./seed-users.sql
+npx wrangler d1 execute corepro-eficiencia --remote --file=./migrations/0001_initial_schema.sql
+npx wrangler d1 execute corepro-eficiencia --remote --file=./migrations/0002_auth_multi_tenant.sql
+npx wrangler d1 execute corepro-eficiencia --remote --file=./seed.sql
+npx wrangler d1 execute corepro-eficiencia --remote --file=./seed-users.sql
 ```
 
 ### Desenvolvimento local (sandbox)
@@ -140,7 +150,7 @@ pm2 start ecosystem.config.cjs
 
 ## 📌 Status
 - **Plataforma**: Cloudflare Pages
-- **Status**: ✅ Ativo em produção (https://confecsystem-eficiencia.pages.dev)
+- **Status**: ✅ Ativo em produção (https://corepro-eficiencia.pages.dev)
 - **Última atualização**: 23/04/2026
 - **Deploy ID**: 47d17129
 
