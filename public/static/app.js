@@ -1512,10 +1512,14 @@ async function viewBonus() {
           method: 'PUT',
           body: { ano: state.ano, mes: state.mes, eficiencia_pct, observacao }
         });
+        if (!resp || resp.ok === false) {
+          throw new Error(resp?.error || 'Resposta inválida do servidor');
+        }
         // Confirma persistência relendo do banco (evita ilusão de save)
         const verify = await api(`/api/bonificacao-geral?ano=${state.ano}&mes=${state.mes}&_=${Date.now()}`);
-        if (Math.abs(Number(verify.eficiencia_pct) - eficiencia_pct) > 0.01) {
-          throw new Error('Falha ao persistir. Recarregue a página.');
+        const persisted = Number(verify?.eficiencia_pct);
+        if (!Number.isFinite(persisted) || Math.abs(persisted - eficiencia_pct) > 0.01) {
+          throw new Error(`Banco retornou ${persisted}% — persistência falhou. Recarregue a página.`);
         }
         toast(`Dados salvos com sucesso (${eficiencia_pct.toFixed(2)}%)`, 'success');
         // Força recarregar stats do servidor
@@ -1523,7 +1527,8 @@ async function viewBonus() {
         state.evolucao = null;
         await navigate('bonus');
       } catch (e) {
-        toast('Erro ao salvar: ' + e.message, 'error');
+        console.error('[Salvar Eficiência Geral] erro:', e);
+        toast('Erro ao salvar. Tente novamente: ' + (e.message || ''), 'error');
       } finally {
         btnSave.disabled = false;
         btnSave.innerHTML = original;
@@ -1729,21 +1734,37 @@ window.deleteProd = async (id) => {
 function openProdModal(prod = null) {
   const isEdit = !!prod;
   const today = new Date().toISOString().slice(0,10);
+  const costureirosAtivos = state.costureiros.filter(c => c.ativo);
+
+  // Aviso amigável quando ainda não há costureiros cadastrados
+  if (!isEdit && costureirosAtivos.length === 0) {
+    toast('Cadastre ao menos um costureiro antes de registrar produção', 'error');
+    navigate('costureiros');
+    return;
+  }
+
   document.body.insertAdjacentHTML('beforeend', `
     <div class="modal-backdrop" id="modal-backdrop">
-      <div class="modal">
+      <form class="modal" id="prod-form" novalidate>
         <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
           <h3 class="font-bold text-lg">${isEdit ? 'Editar' : 'Novo'} Registro de Produção</h3>
-          <button class="btn btn-ghost p-2" onclick="closeModal()"><i class="fas fa-times"></i></button>
+          <button type="button" class="btn btn-ghost p-2" onclick="closeModal()"><i class="fas fa-times"></i></button>
         </div>
         <div class="p-5 space-y-3">
+          <div id="prod-form-error" class="hidden p-3 rounded-md bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300"></div>
+
           <div class="grid grid-cols-2 gap-3">
-            <div><label class="text-xs font-semibold text-slate-500">Data</label>
-              <input type="date" id="p-data" class="input" value="${prod?.data || today}"/></div>
-            <div><label class="text-xs font-semibold text-slate-500">Costureiro</label>
-              <select id="p-cost" class="input">
-                ${state.costureiros.filter(c => c.ativo).map(c => `<option value="${c.id}" ${prod?.costureiro_id === c.id ? 'selected' : ''}>${c.nome}</option>`).join('')}
-              </select></div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Data <span class="text-red-500">*</span></label>
+              <input type="date" id="p-data" class="input" value="${prod?.data || today}" required/>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Costureiro <span class="text-red-500">*</span></label>
+              <select id="p-cost" class="input" required>
+                <option value="">-- selecione --</option>
+                ${costureirosAtivos.map(c => `<option value="${c.id}" ${prod?.costureiro_id === c.id ? 'selected' : ''}>${c.nome}</option>`).join('')}
+              </select>
+            </div>
           </div>
           <div>
             <label class="text-xs font-semibold text-slate-500">Operação</label>
@@ -1753,60 +1774,149 @@ function openProdModal(prod = null) {
             </select>
           </div>
           <div class="grid grid-cols-2 gap-3">
-            <div><label class="text-xs font-semibold text-slate-500">Referência da peça</label>
-              <input id="p-ref" class="input" value="${prod?.referencia_peca || ''}"/></div>
-            <div><label class="text-xs font-semibold text-slate-500">Tempo Padrão (min)</label>
-              <input id="p-tempo" type="number" step="0.1" class="input" value="${prod?.tempo_padrao_min || ''}"/></div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Referência da peça</label>
+              <input id="p-ref" class="input" value="${prod?.referencia_peca || ''}"/>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Tempo Padrão (min)</label>
+              <input id="p-tempo" type="number" step="0.01" min="0" class="input" value="${prod?.tempo_padrao_min ?? ''}"/>
+            </div>
           </div>
           <div class="grid grid-cols-3 gap-3">
-            <div><label class="text-xs font-semibold text-slate-500">Qtd Produzida</label>
-              <input id="p-qtd" type="number" class="input" value="${prod?.quantidade_produzida || 0}"/></div>
-            <div><label class="text-xs font-semibold text-slate-500">Min Trabalhados</label>
-              <input id="p-min" type="number" step="0.1" class="input" value="${prod?.minutos_trabalhados || 0}"/></div>
-            <div><label class="text-xs font-semibold text-slate-500">Retrabalho</label>
-              <input id="p-retr" type="number" class="input" value="${prod?.retrabalho || 0}"/></div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Qtd Produzida</label>
+              <input id="p-qtd" type="number" min="0" step="1" class="input" value="${prod?.quantidade_produzida ?? 0}"/>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Min Trabalhados</label>
+              <input id="p-min" type="number" step="0.01" min="0" class="input" value="${prod?.minutos_trabalhados ?? 0}"/>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-slate-500">Retrabalho</label>
+              <input id="p-retr" type="number" min="0" step="1" class="input" value="${prod?.retrabalho ?? 0}"/>
+            </div>
           </div>
         </div>
         <div class="p-5 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
-          <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
-          <button class="btn btn-primary" onclick="saveProd(${prod?.id || 'null'})"><i class="fas fa-save"></i> Salvar</button>
+          <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+          <button type="submit" id="prod-save-btn" class="btn btn-primary"><i class="fas fa-save"></i> Salvar</button>
         </div>
-      </div>
+      </form>
     </div>
   `);
-  document.getElementById('modal-backdrop').addEventListener('click', (e) => { if (e.target.id === 'modal-backdrop') closeModal(); });
 
-  // auto preencher tempo padrão
+  // Fechar ao clicar no backdrop
+  document.getElementById('modal-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'modal-backdrop') closeModal();
+  });
+
+  // Auto-preencher tempo padrão a partir da operação escolhida
   document.getElementById('p-op').addEventListener('change', (e) => {
     const opt = e.target.selectedOptions[0];
     if (opt && opt.dataset.tempo) document.getElementById('p-tempo').value = opt.dataset.tempo;
+  });
+
+  // Submit do formulário (Enter ou clique no botão Salvar)
+  document.getElementById('prod-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await saveProd(prod?.id || null);
   });
 }
 
 window.closeModal = () => { const b = document.getElementById('modal-backdrop'); if (b) b.remove(); };
 
+/**
+ * Mostra erro no banner do modal (sem fechar) ou via toast como fallback.
+ */
+function showProdFormError(msg) {
+  const box = document.getElementById('prod-form-error');
+  if (box) {
+    box.textContent = msg;
+    box.classList.remove('hidden');
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } else {
+    toast(msg, 'error');
+  }
+}
+function clearProdFormError() {
+  const box = document.getElementById('prod-form-error');
+  if (box) { box.textContent = ''; box.classList.add('hidden'); }
+}
+
 window.saveProd = async (id) => {
-  const opSel = document.getElementById('p-op');
-  const opNome = opSel.selectedOptions[0]?.dataset?.nome || opSel.selectedOptions[0]?.textContent.split('(')[0].trim() || null;
+  clearProdFormError();
+  const btn = document.getElementById('prod-save-btn');
+
+  // Coleta de campos
+  const elData = document.getElementById('p-data');
+  const elCost = document.getElementById('p-cost');
+  const elOp   = document.getElementById('p-op');
+  const elRef  = document.getElementById('p-ref');
+  const elTmp  = document.getElementById('p-tempo');
+  const elQtd  = document.getElementById('p-qtd');
+  const elMin  = document.getElementById('p-min');
+  const elRet  = document.getElementById('p-retr');
+
+  const dataStr = (elData.value || '').trim();
+  const costId  = elCost.value;
+  const opId    = elOp.value;
+  const opNome  = elOp.selectedOptions[0]?.dataset?.nome
+                || (elOp.selectedOptions[0]?.textContent || '').split('(')[0].trim()
+                || null;
+
+  // Validações cliente (antes de bater no backend)
+  if (!dataStr) { showProdFormError('Informe a data do registro.'); elData.focus(); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataStr)) { showProdFormError('Data em formato inválido.'); elData.focus(); return; }
+  if (!costId) { showProdFormError('Selecione um costureiro.'); elCost.focus(); return; }
+
   const body = {
-    data: document.getElementById('p-data').value,
-    costureiro_id: Number(document.getElementById('p-cost').value),
-    operacao_id: opSel.value ? Number(opSel.value) : null,
+    data: dataStr,
+    costureiro_id: Number(costId),
+    operacao_id: opId ? Number(opId) : null,
     operacao: opNome,
-    referencia_peca: document.getElementById('p-ref').value,
-    tempo_padrao_min: Number(document.getElementById('p-tempo').value),
-    quantidade_produzida: Number(document.getElementById('p-qtd').value),
-    minutos_trabalhados: Number(document.getElementById('p-min').value),
-    retrabalho: Number(document.getElementById('p-retr').value),
+    referencia_peca: (elRef.value || '').trim() || null,
+    tempo_padrao_min: Number(elTmp.value) || 0,
+    quantidade_produzida: Number(elQtd.value) || 0,
+    minutos_trabalhados: Number(elMin.value) || 0,
+    retrabalho: Number(elRet.value) || 0,
   };
+
+  // Validação extra de números: não permite negativos
+  for (const f of ['tempo_padrao_min','quantidade_produzida','minutos_trabalhados','retrabalho']) {
+    if (Number.isNaN(body[f]) || body[f] < 0) {
+      showProdFormError(`Campo "${f}" inválido — informe um número ≥ 0.`);
+      return;
+    }
+  }
+
+  // UI: loading
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Salvando…';
+
   try {
-    if (id) await api(`/api/producao/${id}`, { method: 'PUT', body });
-    else await api('/api/producao', { method: 'POST', body });
-    toast('Registro salvo', 'success');
+    let resp;
+    if (id) {
+      resp = await api(`/api/producao/${id}`, { method: 'PUT', body });
+    } else {
+      resp = await api('/api/producao', { method: 'POST', body });
+    }
+    if (!resp || resp.ok === false) {
+      throw new Error(resp?.error || 'Resposta inválida do servidor');
+    }
+    toast(id ? 'Registro atualizado com sucesso' : 'Registro salvo com sucesso', 'success');
     closeModal();
-    state.stats = null; state.evolucao = null;
+    // Invalida cache e força recarregar a lista
+    state.stats = null;
+    state.evolucao = null;
     await navigate('producao');
-  } catch (e) { toast(e.message, 'error'); }
+  } catch (e) {
+    console.error('[saveProd] erro:', e);
+    showProdFormError('Erro ao salvar: ' + (e.message || 'Tente novamente'));
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
 };
 
 // =====================================================

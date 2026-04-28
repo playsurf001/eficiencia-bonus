@@ -329,11 +329,75 @@ app.get('/api/producao', async (c) => {
   return c.json(results)
 })
 
+/**
+ * Valida e normaliza payload de produção (compartilhado entre POST e PUT).
+ * Retorna `{ ok: true, data }` ou `{ ok: false, error }`.
+ */
+function validarProducao(body: any): { ok: true; data: any } | { ok: false; error: string } {
+  // Data: formato YYYY-MM-DD obrigatório
+  if (!body || typeof body !== 'object') return { ok: false, error: 'Corpo da requisição inválido' }
+  if (!body.data || typeof body.data !== 'string') {
+    return { ok: false, error: 'Campo "data" é obrigatório (formato AAAA-MM-DD)' }
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(body.data)) {
+    return { ok: false, error: 'Data deve estar no formato AAAA-MM-DD' }
+  }
+  const dt = new Date(body.data + 'T00:00:00Z')
+  if (Number.isNaN(dt.getTime())) {
+    return { ok: false, error: 'Data inválida' }
+  }
+  // Costureiro: obrigatório, número válido > 0
+  const costureiro_id = Number(body.costureiro_id)
+  if (!Number.isFinite(costureiro_id) || costureiro_id <= 0) {
+    return { ok: false, error: 'Selecione um costureiro válido' }
+  }
+  // Operação: opcional, mas se fornecida deve ser válida
+  const operacao_id = body.operacao_id != null && body.operacao_id !== ''
+    ? Number(body.operacao_id) : null
+  if (operacao_id != null && (!Number.isFinite(operacao_id) || operacao_id <= 0)) {
+    return { ok: false, error: 'ID de operação inválido' }
+  }
+  // Quantidade e minutos: aceitam 0 mas não podem ser negativos
+  const tempo_padrao_min = Number(body.tempo_padrao_min) || 0
+  const quantidade_produzida = Number(body.quantidade_produzida) || 0
+  const minutos_trabalhados = Number(body.minutos_trabalhados) || 0
+  const retrabalho = Number(body.retrabalho) || 0
+  if (tempo_padrao_min < 0) return { ok: false, error: 'Tempo padrão não pode ser negativo' }
+  if (quantidade_produzida < 0) return { ok: false, error: 'Quantidade produzida não pode ser negativa' }
+  if (minutos_trabalhados < 0) return { ok: false, error: 'Minutos trabalhados não podem ser negativos' }
+  if (retrabalho < 0) return { ok: false, error: 'Retrabalho não pode ser negativo' }
+
+  return {
+    ok: true,
+    data: {
+      data: body.data,
+      costureiro_id,
+      operacao_id,
+      operacao: (body.operacao || '').toString().trim() || null,
+      referencia_peca: (body.referencia_peca || '').toString().trim() || null,
+      tempo_padrao_min,
+      quantidade_produzida,
+      minutos_trabalhados,
+      retrabalho,
+    },
+  }
+}
+
 app.post('/api/producao', authMiddleware, requireRole('admin', 'gestor', 'operador'), async (c) => {
   const u = c.get('user')
-  const body = await c.req.json<any>()
-  if (!body.costureiro_id || !body.data)
-    return c.json({ error: 'costureiro_id e data são obrigatórios' }, 400)
+  let body: any
+  try { body = await c.req.json() } catch {
+    return c.json({ error: 'JSON inválido no corpo da requisição' }, 400)
+  }
+  const v = validarProducao(body)
+  if (!v.ok) return c.json({ error: v.error }, 400)
+
+  // Verifica se costureiro pertence à empresa do usuário (segurança multi-tenant)
+  const cost = await c.env.DB.prepare(
+    'SELECT id FROM costureiros WHERE id = ? AND empresa_id = ? AND ativo = 1'
+  ).bind(v.data.costureiro_id, u.empresa_id).first()
+  if (!cost) return c.json({ error: 'Costureiro não encontrado ou inativo' }, 400)
+
   const r = await c.env.DB.prepare(
     `INSERT INTO producao
       (empresa_id, data, costureiro_id, operacao_id, operacao, referencia_peca,
@@ -341,21 +405,47 @@ app.post('/api/producao', authMiddleware, requireRole('admin', 'gestor', 'operad
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
-      u.empresa_id, body.data, Number(body.costureiro_id),
-      body.operacao_id || null, body.operacao || null, body.referencia_peca || null,
-      Number(body.tempo_padrao_min) || 0,
-      Number(body.quantidade_produzida) || 0,
-      Number(body.minutos_trabalhados) || 0,
-      Number(body.retrabalho) || 0,
+      u.empresa_id, v.data.data, v.data.costureiro_id,
+      v.data.operacao_id, v.data.operacao, v.data.referencia_peca,
+      v.data.tempo_padrao_min, v.data.quantidade_produzida,
+      v.data.minutos_trabalhados, v.data.retrabalho,
     )
     .run()
-  return c.json({ id: r.meta.last_row_id })
+
+  // Retorna o registro completo (com nome do costureiro) para a UI já mostrar sem refetch
+  const novo = await c.env.DB.prepare(`
+    SELECT p.*, c.nome AS costureiro_nome, c.tipo_maquina
+    FROM producao p JOIN costureiros c ON c.id = p.costureiro_id
+    WHERE p.id = ? AND p.empresa_id = ?
+  `).bind(r.meta.last_row_id, u.empresa_id).first()
+
+  return c.json({ ok: true, id: r.meta.last_row_id, registro: novo })
 })
 
 app.put('/api/producao/:id', authMiddleware, requireRole('admin', 'gestor', 'operador'), async (c) => {
   const u = c.get('user')
   const id = Number(c.req.param('id'))
-  const body = await c.req.json<any>()
+  if (!Number.isFinite(id) || id <= 0) return c.json({ error: 'ID inválido' }, 400)
+
+  let body: any
+  try { body = await c.req.json() } catch {
+    return c.json({ error: 'JSON inválido no corpo da requisição' }, 400)
+  }
+  const v = validarProducao(body)
+  if (!v.ok) return c.json({ error: v.error }, 400)
+
+  // Verifica que o registro existe e pertence à empresa
+  const existing = await c.env.DB.prepare(
+    'SELECT id FROM producao WHERE id = ? AND empresa_id = ?'
+  ).bind(id, u.empresa_id).first()
+  if (!existing) return c.json({ error: 'Registro não encontrado' }, 404)
+
+  // Verifica costureiro
+  const cost = await c.env.DB.prepare(
+    'SELECT id FROM costureiros WHERE id = ? AND empresa_id = ? AND ativo = 1'
+  ).bind(v.data.costureiro_id, u.empresa_id).first()
+  if (!cost) return c.json({ error: 'Costureiro não encontrado ou inativo' }, 400)
+
   await c.env.DB.prepare(
     `UPDATE producao SET
       data=?, costureiro_id=?, operacao_id=?, operacao=?, referencia_peca=?,
@@ -363,16 +453,21 @@ app.put('/api/producao/:id', authMiddleware, requireRole('admin', 'gestor', 'ope
       WHERE id=? AND empresa_id=?`
   )
     .bind(
-      body.data, Number(body.costureiro_id), body.operacao_id || null,
-      body.operacao || null, body.referencia_peca || null,
-      Number(body.tempo_padrao_min) || 0,
-      Number(body.quantidade_produzida) || 0,
-      Number(body.minutos_trabalhados) || 0,
-      Number(body.retrabalho) || 0,
+      v.data.data, v.data.costureiro_id, v.data.operacao_id,
+      v.data.operacao, v.data.referencia_peca,
+      v.data.tempo_padrao_min, v.data.quantidade_produzida,
+      v.data.minutos_trabalhados, v.data.retrabalho,
       id, u.empresa_id
     )
     .run()
-  return c.json({ ok: true })
+
+  const atualizado = await c.env.DB.prepare(`
+    SELECT p.*, c.nome AS costureiro_nome, c.tipo_maquina
+    FROM producao p JOIN costureiros c ON c.id = p.costureiro_id
+    WHERE p.id = ? AND p.empresa_id = ?
+  `).bind(id, u.empresa_id).first()
+
+  return c.json({ ok: true, id, registro: atualizado })
 })
 
 app.delete('/api/producao/:id', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
