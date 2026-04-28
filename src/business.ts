@@ -1,16 +1,27 @@
 import type { MetasConfig, EstatisticaCostureiro } from './types';
 
 /**
- * Regras de negócio — replicação EXATA da aba "Bonificação" da planilha
+ * Regras de negócio — RÉPLICA EXATA da aba "Bonificação" da planilha original.
  *
- * Fórmula central (NÃO ALTERAR):
- *   Bonificação Individual = eficiência × 20,00 × (100 / 2)
- *   - "eficiência" é o valor decimal (ex.: 0,85 para 85%)
- *   - Só calcula se eficiência ≥ 75%, senão = 0
+ * Fórmulas reais descobertas analisando o arquivo março2.xlsx:
  *
- * Bonificação Final = Bonificação Geral (manual) + Bonificação Individual
- *   - Sempre ≥ 0
- *   - Se algum for 0, mostra apenas o outro
+ *   Bonificação Geral  $ = (Eficiência_Geral_do_Mês - 0,75) × 20 × (100/2)
+ *   Bonificação Indiv. $ = (Eficiência_Individual    - 0,75) × 20 × (100/2)
+ *   Bonificação Final  $ = SUMIF(>0)  ← soma SOMENTE valores positivos
+ *
+ * Constantes da planilha (configuráveis via tabela `metas_config`):
+ *   - eficiencia_minima       = 0,75 (75%)  → AG5
+ *   - bonus_real_por_percent  = 20         → AJ4
+ *
+ * Observações importantes:
+ *   - A "Bonificação Geral" é AUTOMÁTICA, não editável: vem da eficiência geral
+ *     do mês (AG8 da planilha). A planilha tem um campo manual para o admin
+ *     informar essa eficiência geral.
+ *   - Se a eficiência (geral ou individual) for menor que 75%, o componente
+ *     correspondente fica negativo e é descartado pelo SUMIF (vira 0).
+ *   - A regra é simétrica: ambos componentes podem entrar ou ficar 0.
+ *   - Eficiência é calculada como D197/D195 = minutos_efetivos / minutos_disponíveis,
+ *     o que no nosso modelo equivale a `total_minutos_produzidos / total_minutos_trabalhados`.
  */
 
 export interface StatsRaw {
@@ -18,37 +29,70 @@ export interface StatsRaw {
   nome: string;
   tipo_maquina: string;
   total_producao: number;            // SUM(quantidade_produzida)
-  total_minutos_trabalhados: number; // SUM(minutos_trabalhados)
-  total_minutos_produzidos: number;  // SUM(quantidade_produzida * tempo_padrao_min)
-  total_minutos_produzidos_ponderados: number; // não usado (mantido para compat de SQL)
+  total_minutos_trabalhados: number; // SUM(minutos_trabalhados) = D195 (disponível)
+  total_minutos_produzidos: number;  // SUM(qtd × tempo_padrao) = D197 (efetivo)
+  total_minutos_produzidos_ponderados: number; // legado (não usado)
   dias_trabalhados: number;
   retrabalho_total: number;
   total_registros: number;
 }
 
-/** Limiar mínimo de eficiência para acionar a bonificação individual */
+/* ────────────────────────────────────────────────────────────
+ * Constantes da fórmula (espelham a planilha)
+ * ──────────────────────────────────────────────────────────── */
+
+/** Limiar mínimo de eficiência para a fórmula (AG5 da planilha) */
 export const EFICIENCIA_MIN_BONIFICACAO = 75; // %
 
+/** Real por ponto percentual (AJ4 da planilha) */
+export const REAL_POR_PERCENT = 20;
+
+/** Multiplicador final (100/2 = 50, fixo na planilha) */
+export const MULTIPLICADOR_FINAL = 50;
+
+/* ────────────────────────────────────────────────────────────
+ * Cálculo dos componentes
+ * ──────────────────────────────────────────────────────────── */
+
 /**
- * FÓRMULA EXATA da planilha — não alterar.
+ * Calcula o componente da bonificação a partir de uma eficiência (em %).
  *
- * @param eficienciaPct  eficiência em pontos percentuais (ex.: 85 = 85%)
- * @returns valor da bonificação individual em R$ (com 2 casas)
+ *   componente = (eficiencia - 0,75) × 20 × 50
+ *
+ * Pode dar negativo. O chamador decide se descarta (regra SUMIF da planilha).
+ *
+ * @param eficienciaPct  eficiência em pontos percentuais (ex.: 78 = 78%)
  */
-export function calcularBonificacaoIndividual(eficienciaPct: number): number {
-  if (!Number.isFinite(eficienciaPct) || eficienciaPct < EFICIENCIA_MIN_BONIFICACAO) {
-    return 0;
-  }
-  // eficiência decimal × 20,00 × (100 / 2)
+export function calcularComponenteBonificacao(eficienciaPct: number): number {
+  if (!Number.isFinite(eficienciaPct)) return 0;
+  // Replica EXATAMENTE a fórmula da planilha: ((eficiencia/100 - 0,75) × 20) × 100/2
   const eficienciaDecimal = eficienciaPct / 100;
-  const valor = eficienciaDecimal * 20.0 * (100 / 2);
-  return Math.round(valor * 100) / 100; // 2 casas decimais
+  const limiarDecimal = EFICIENCIA_MIN_BONIFICACAO / 100; // 0,75
+  const valor = (eficienciaDecimal - limiarDecimal) * REAL_POR_PERCENT * MULTIPLICADOR_FINAL;
+  return Math.round(valor * 10000) / 10000; // 4 casas (igual ao Excel) — arredonda 2 só na exibição
 }
 
 /**
- * Soma bonificação geral + individual, garantindo regras:
- *  - apenas valores positivos contam
- *  - resultado nunca negativo
+ * Bonificação Individual = componente individual (positivo ou 0).
+ * Apenas o SUMIF(>0) — se for negativo retorna 0.
+ */
+export function calcularBonificacaoIndividual(eficienciaIndividualPct: number): number {
+  const v = calcularComponenteBonificacao(eficienciaIndividualPct);
+  return v > 0 ? Math.round(v * 100) / 100 : 0;
+}
+
+/**
+ * Bonificação Geral $ = componente da eficiência geral do mês (positivo ou 0).
+ * Mesma fórmula, igual para todos os costureiros do período.
+ */
+export function calcularBonificacaoGeralValor(eficienciaGeralPct: number): number {
+  const v = calcularComponenteBonificacao(eficienciaGeralPct);
+  return v > 0 ? Math.round(v * 100) / 100 : 0;
+}
+
+/**
+ * Bonificação Final = soma APENAS dos componentes positivos (regra SUMIF da planilha).
+ * Nunca negativo.
  */
 export function calcularBonificacaoFinal(
   bonificacaoGeral: number,
@@ -60,9 +104,27 @@ export function calcularBonificacaoFinal(
   return total > 0 ? Math.round(total * 100) / 100 : 0;
 }
 
+/* ────────────────────────────────────────────────────────────
+ * Eficiência geral automática (D197/D195 a nível empresa)
+ * ──────────────────────────────────────────────────────────── */
+
 /**
- * Classifica desempenho usando os limiares configuráveis (eficiência geral apenas)
+ * Calcula a "Eficiência Geral do Mês" automaticamente a partir das produções:
+ *   = SUM(min_efetivos) / SUM(min_disponíveis) × 100
+ *
+ * Equivalente a AG8 da planilha quando preenchida automaticamente.
  */
+export function calcularEficienciaGeralMes(raws: StatsRaw[]): number {
+  const totalEfetivo = raws.reduce((s, r) => s + r.total_minutos_produzidos, 0);
+  const totalDisp = raws.reduce((s, r) => s + r.total_minutos_trabalhados, 0);
+  if (totalDisp <= 0) return 0;
+  return Number(((totalEfetivo / totalDisp) * 100).toFixed(2));
+}
+
+/* ────────────────────────────────────────────────────────────
+ * Classificação de desempenho
+ * ──────────────────────────────────────────────────────────── */
+
 export function classificarDesempenho(
   eficienciaPct: number,
   config: MetasConfig
@@ -72,37 +134,55 @@ export function classificarDesempenho(
   return 'baixo';
 }
 
+/* ────────────────────────────────────────────────────────────
+ * Consolidação completa por costureiro
+ * ──────────────────────────────────────────────────────────── */
+
 /**
- * Consolida as estatísticas mensais de um costureiro aplicando a fórmula da planilha.
+ * Consolida estatísticas mensais aplicando a fórmula da planilha.
+ *
+ * @param raw                 dados brutos do costureiro (D195/D197)
+ * @param config              configuração da empresa
+ * @param eficienciaGeralPct  eficiência geral do mês em % (ex.: 78 = 78%)
+ *                            Se omitido, o componente Geral fica 0.
  */
 export function consolidarEstatisticas(
   raw: StatsRaw,
   config: MetasConfig,
-  bonificacaoGeral: number = 0
+  eficienciaGeralPct: number = 0
 ): EstatisticaCostureiro {
-  // Eficiência = (tempo_padrao * qtd) / minutos_trabalhados * 100
+  // Eficiência individual = D197/D195 × 100  (idêntico à planilha)
   const eficienciaRaw = raw.total_minutos_trabalhados > 0
     ? (raw.total_minutos_produzidos / raw.total_minutos_trabalhados) * 100
     : 0;
-  // Mesmo arredondamento da planilha: 2 casas decimais aplicado ANTES da fórmula
   const eficiencia = Number(eficienciaRaw.toFixed(2));
 
-  // Frequência = dias_trabalhados / dias_uteis_mes * 100
+  // Frequência (informativo)
   const frequencia = config.dias_uteis_mes > 0
     ? (raw.dias_trabalhados / config.dias_uteis_mes) * 100
     : 0;
 
-  // Qualidade: 100% - (retrabalho / producao * 100), limitado entre 0-100
+  // Qualidade (informativo)
   const qualidade = raw.total_producao > 0
     ? Math.max(0, 100 - (raw.retrabalho_total / raw.total_producao) * 100)
     : 100;
 
-  // ─── BONIFICAÇÃO ─── (fórmula da planilha, sem peso/ponderação) ───
-  // Usa a eficiência já arredondada (2 casas) para ser idêntico ao Excel
+  // ─── Fórmulas da planilha — usar valor sem arredondar antes (igual Excel) ───
+  const bonificacaoGeralValor = calcularBonificacaoGeralValor(eficienciaGeralPct);
   const bonificacaoIndividual = calcularBonificacaoIndividual(eficiencia);
-  const bonificacaoFinal = calcularBonificacaoFinal(bonificacaoGeral, bonificacaoIndividual);
+  const bonificacaoFinal = calcularBonificacaoFinal(bonificacaoGeralValor, bonificacaoIndividual);
 
   const classe = classificarDesempenho(eficiencia, config);
+
+  // Motivo informativo: se ambos componentes são 0
+  let motivo: string | undefined;
+  if (bonificacaoFinal === 0) {
+    if (eficiencia < EFICIENCIA_MIN_BONIFICACAO && eficienciaGeralPct < EFICIENCIA_MIN_BONIFICACAO) {
+      motivo = `Eficiência individual (${eficiencia.toFixed(2)}%) e geral (${eficienciaGeralPct.toFixed(2)}%) abaixo de ${EFICIENCIA_MIN_BONIFICACAO}%`;
+    } else if (eficiencia < EFICIENCIA_MIN_BONIFICACAO) {
+      motivo = `Eficiência individual ${eficiencia.toFixed(2)}% abaixo de ${EFICIENCIA_MIN_BONIFICACAO}%`;
+    }
+  }
 
   return {
     costureiro_id: raw.costureiro_id,
@@ -112,25 +192,23 @@ export function consolidarEstatisticas(
     total_minutos_trabalhados: raw.total_minutos_trabalhados,
     total_minutos_produzidos: raw.total_minutos_produzidos,
     eficiencia,
-    eficiencia_ponderada: eficiencia, // mantém compat (= eficiência simples)
+    eficiencia_ponderada: eficiencia, // mantém compat — = eficiência simples
     dias_trabalhados: raw.dias_trabalhados,
     dias_uteis: config.dias_uteis_mes,
     frequencia: Number(frequencia.toFixed(2)),
     retrabalho_total: raw.retrabalho_total,
     qualidade: Number(qualidade.toFixed(2)),
     bonificacao_individual: bonificacaoIndividual,
-    bonificacao_geral: Number(bonificacaoGeral.toFixed(2)),
+    bonificacao_geral: bonificacaoGeralValor,
     bonificacao_final: bonificacaoFinal,
-    bonus: bonificacaoFinal, // compat: campo antigo
-    motivo_bloqueio: eficiencia < EFICIENCIA_MIN_BONIFICACAO
-      ? `Eficiência ${eficiencia.toFixed(2)}% abaixo do mínimo (${EFICIENCIA_MIN_BONIFICACAO}%) para bonificação individual`
-      : undefined,
+    bonus: bonificacaoFinal, // alias legado
+    motivo_bloqueio: motivo,
     classe,
   };
 }
 
 /**
- * Retorna o primeiro e último dia do mês
+ * Retorna primeiro/último dia do mês.
  */
 export function rangeDoMes(ano: number, mes: number): { inicio: string; fim: string } {
   const inicio = new Date(Date.UTC(ano, mes - 1, 1));

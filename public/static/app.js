@@ -1241,40 +1241,60 @@ function renderPerfil() {
 }
 
 // =====================================================
-// TELA 4 — BONIFICAÇÃO
+// TELA 4 — BONIFICAÇÃO  (RÉPLICA EXATA da aba "Bonificação" da planilha)
 // =====================================================
 /* =====================================================
- *  BONIFICAÇÃO — réplica fiel da aba "Bonificação" da planilha
- *  Fórmula: Bonificação Individual = (eficiência/100) × 20 × (100/2)
- *           Só calcula se eficiência ≥ 75%, senão = 0
- *  Bonificação Final = Bonificação Geral (manual) + Bonificação Individual
+ *  Fórmulas reais (idênticas ao Excel):
+ *
+ *    Bonificação Geral $   = (Eficiência_Geral_Mês - 0,75) × 20 × (100/2)
+ *    Bonificação Indiv. $  = (Eficiência_Individual - 0,75) × 20 × (100/2)
+ *    Bonificação Final     = SUMIF(>0)  ← descarta valores negativos
+ *
+ *  - Eficiência Geral do Mês: campo único, vem da empresa toda (AG8)
+ *    pode ser informado manualmente pelo admin OU calculado automaticamente
+ *  - Bonificação Geral é o MESMO valor para todos os costureiros do mês
+ *  - Limiar 75% e fator 20 são constantes da planilha
  * ===================================================== */
-const EFICIENCIA_MIN_BONIFICACAO = 75;
+const EFICIENCIA_MIN_BONIFICACAO = 75; // %
+const REAL_POR_PERCENT = 20;
+const MULTIPLICADOR_FINAL = 50; // 100/2
 
-function calcularBonificacaoIndividualClient(eficienciaPct) {
-  if (!Number.isFinite(eficienciaPct) || eficienciaPct < EFICIENCIA_MIN_BONIFICACAO) return 0;
+/** Componente da fórmula = (efic - 0,75) × 20 × 50  (pode ser negativo) */
+function calcularComponenteBonificacao(eficienciaPct) {
+  if (!Number.isFinite(eficienciaPct)) return 0;
   const eficienciaDecimal = eficienciaPct / 100;
-  const valor = eficienciaDecimal * 20.0 * (100 / 2);
-  return Math.round(valor * 100) / 100;
+  const limiarDecimal = EFICIENCIA_MIN_BONIFICACAO / 100;
+  return (eficienciaDecimal - limiarDecimal) * REAL_POR_PERCENT * MULTIPLICADOR_FINAL;
+}
+
+/** Bonificação Individual: SUMIF(>0) */
+function calcularBonificacaoIndividualClient(eficienciaPct) {
+  const v = calcularComponenteBonificacao(eficienciaPct);
+  return v > 0 ? Math.round(v * 100) / 100 : 0;
+}
+
+/** Bonificação Geral $ a partir da Eficiência Geral do Mês */
+function calcularBonificacaoGeralValorClient(eficienciaGeralPct) {
+  const v = calcularComponenteBonificacao(eficienciaGeralPct);
+  return v > 0 ? Math.round(v * 100) / 100 : 0;
 }
 
 async function viewBonus() {
   const stats = await loadStats();
-  const bonificacaoGeral = Number(stats.bonificacao_geral || stats.kpis.bonificacao_geral || 0);
+  const eficGeralMes = Number(stats.eficiencia_geral_mes ?? 0);
+  const eficGeralManual = !!stats.eficiencia_geral_manual;
+  const bonificacaoGeralValor = Number(stats.bonificacao_geral_valor ?? 0);
   const canEdit = state.user && (state.user.role === 'admin' || state.user.role === 'gestor');
 
   // Sort: maior eficiência primeiro
   const lista = [...stats.costureiros].sort((a, b) => b.eficiencia - a.eficiencia);
 
-  // Totais a partir dos dados consolidados pelo backend
+  // Totais consolidados pelo backend (já aplicam SUMIF)
   const totalIndividual = stats.kpis.total_bonificacao_individual ?? lista.reduce((s, c) => s + (c.bonificacao_individual || 0), 0);
+  const totalFinal = stats.kpis.total_bonificacao_final ?? lista.reduce((s, c) => s + (c.bonificacao_final || 0), 0);
   const numCostureiros = lista.length;
-  const totalGeral = bonificacaoGeral; // valor fixo, único para a empresa
-  const totalFinal = totalIndividual + totalGeral * (numCostureiros > 0 ? 1 : 0);
-  // Obs.: a tela mostra bonificação geral por costureiro (cada um recebe o mesmo valor manual)
-  // O total geral pago é Geral × num_costureiros + soma das individuais
-  const totalGeralPago = totalGeral * numCostureiros;
-  const totalFinalPago = totalIndividual + totalGeralPago;
+  // Soma da Bonificação Geral é a coluna do back (cada costureiro elegível recebe o mesmo $ Geral)
+  const totalGeralPago = lista.reduce((s, c) => s + (c.bonificacao_geral || 0), 0);
   const recebem = lista.filter(c => (c.bonificacao_final || 0) > 0).length;
 
   document.getElementById('view').innerHTML = `
@@ -1282,7 +1302,7 @@ async function viewBonus() {
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
       <div class="card lg:col-span-2 gradient-bg text-white">
         <div class="text-sm uppercase tracking-wider opacity-80">Total a Pagar em ${MESES[state.mes-1]}/${state.ano}</div>
-        <div class="text-5xl font-extrabold mt-2" id="kpi-total-final">${fmt.money(totalFinalPago)}</div>
+        <div class="text-5xl font-extrabold mt-2" id="kpi-total-final">${fmt.money(totalFinal)}</div>
         <div class="mt-3 text-sm opacity-90">
           <span id="kpi-recebem">${recebem}</span> de ${numCostureiros} costureiros receberão bonificação
         </div>
@@ -1292,57 +1312,76 @@ async function viewBonus() {
             <div class="font-bold text-lg" id="kpi-total-individual">${fmt.money(totalIndividual)}</div>
           </div>
           <div class="bg-white/15 rounded-lg p-2">
-            <div class="text-xs opacity-80">Soma Bonificação Geral (× ${numCostureiros})</div>
+            <div class="text-xs opacity-80">Soma Bonificação Geral</div>
             <div class="font-bold text-lg" id="kpi-total-geral">${fmt.money(totalGeralPago)}</div>
           </div>
         </div>
       </div>
 
-      <!-- Card editável de Bonificação Geral -->
+      <!-- Card editável de Eficiência Geral do Mês (= AG8 do Excel) -->
       <div class="card border-2 border-accent-500/30">
         <h3 class="font-bold mb-2 flex items-center gap-2">
-          <i class="fas fa-money-bill-wave" style="color:#e53e24"></i>
-          Bonificação Geral (R$)
+          <i class="fas fa-percent" style="color:#e53e24"></i>
+          Eficiência Geral do Mês
         </h3>
-        <p class="text-xs text-slate-500 mb-3">Valor manual aplicado a cada costureiro elegível neste mês.</p>
+        <p class="text-xs text-slate-500 mb-3">
+          ${eficGeralManual ? '<span class="text-emerald-600"><i class="fas fa-user-edit"></i> Manual</span>' : '<span class="text-slate-500"><i class="fas fa-magic"></i> Automática</span>'}
+          — usada para calcular a Bonificação Geral $ aplicada a todos os costureiros elegíveis.
+        </p>
         <div class="space-y-2">
-          <input id="bg-input" type="number" min="0" step="0.01" class="input text-2xl font-bold text-center"
-                 value="${bonificacaoGeral.toFixed(2)}" ${canEdit ? '' : 'readonly'} />
+          <div class="relative">
+            <input id="eg-input" type="number" min="0" max="200" step="0.01" class="input text-2xl font-bold text-center pr-8"
+                   value="${eficGeralMes.toFixed(2)}" ${canEdit ? '' : 'readonly'} />
+            <span class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold">%</span>
+          </div>
+          <div class="text-xs text-slate-500">
+            Bonificação Geral $ = <strong>${fmt.money(bonificacaoGeralValor)}</strong>
+            <span class="opacity-70">= (${eficGeralMes.toFixed(2)}% − 75%) × 20 × 50</span>
+          </div>
           ${canEdit ? `
-            <textarea id="bg-obs" class="input text-xs" rows="2" placeholder="Observação (opcional)"></textarea>
-            <button id="bg-save" class="btn btn-primary w-full"><i class="fas fa-save"></i> Salvar Bonificação Geral</button>
+            <textarea id="eg-obs" class="input text-xs" rows="2" placeholder="Observação (opcional)"></textarea>
+            <div class="flex gap-2">
+              <button id="eg-save" class="btn btn-primary flex-1"><i class="fas fa-save"></i> Salvar</button>
+              <button id="eg-auto" class="btn btn-secondary" title="Voltar para cálculo automático"><i class="fas fa-magic"></i></button>
+            </div>
           ` : `<p class="text-xs text-amber-600"><i class="fas fa-lock"></i> Apenas admin/gestor pode editar.</p>`}
         </div>
       </div>
     </div>
 
-    <!-- Fórmula explicativa -->
+    <!-- Fórmula explicativa (planilha) -->
     <div class="card mb-5 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800">
       <div class="flex items-start gap-3">
         <i class="fas fa-calculator text-2xl text-blue-600 mt-1"></i>
         <div class="text-sm">
-          <div class="font-bold text-blue-900 dark:text-blue-200">Fórmula da planilha (não alterar):</div>
+          <div class="font-bold text-blue-900 dark:text-blue-200">Fórmulas idênticas à planilha (Excel) — não alterar:</div>
           <div class="font-mono mt-1 text-blue-800 dark:text-blue-300">
-            Bonificação Individual = eficiência × 20,00 × (100 / 2)
-            <span class="text-slate-500"> &nbsp;— ativa se eficiência ≥ 75%</span>
+            Bonificação Geral  $ = (Eficiência_Geral − 0,75) × 20 × 50
           </div>
           <div class="font-mono text-blue-800 dark:text-blue-300">
-            Bonificação Final = Bonificação Geral + Bonificação Individual
+            Bonificação Indiv. $ = (Eficiência_Indiv. − 0,75) × 20 × 50
+          </div>
+          <div class="font-mono text-blue-800 dark:text-blue-300">
+            Bonificação Final    = SUMIF(&gt;0)  &nbsp;<span class="text-slate-500">(soma só os componentes positivos)</span>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Simulação: alterar Bonificação Geral em tempo real -->
+    <!-- Simulação: alterar Eficiência Geral em tempo real -->
     <div class="card mb-5 no-print">
       <h3 class="font-bold mb-3"><i class="fas fa-flask text-brand-500 mr-2"></i>Simulação em tempo real</h3>
       <p class="text-sm text-slate-500 mb-3">
-        Ajuste a Bonificação Geral abaixo para ver o impacto na folha sem salvar.
+        Ajuste a Eficiência Geral abaixo para ver o impacto na folha sem salvar.
       </p>
       <div class="flex flex-wrap items-end gap-3">
         <div>
-          <label class="text-xs font-semibold text-slate-500">Bonificação Geral simulada (R$)</label>
-          <input id="sim-bg" class="input w-48" type="number" min="0" step="0.01" value="${bonificacaoGeral.toFixed(2)}" />
+          <label class="text-xs font-semibold text-slate-500">Eficiência Geral simulada (%)</label>
+          <input id="sim-eg" class="input w-48" type="number" min="0" max="200" step="0.01" value="${eficGeralMes.toFixed(2)}" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">→ Bonificação Geral $</label>
+          <div id="sim-bg-result" class="input w-48 font-bold text-emerald-600 bg-slate-50 dark:bg-slate-900">${fmt.money(bonificacaoGeralValor)}</div>
         </div>
         <button id="sim-reset" class="btn btn-secondary"><i class="fas fa-undo"></i> Resetar para valor real</button>
       </div>
@@ -1358,13 +1397,14 @@ async function viewBonus() {
         <table class="w-full text-sm" id="bonificacao-table">
           <thead>
             <tr class="text-left text-xs uppercase text-slate-500 border-b border-slate-200 dark:border-slate-700">
+              <th class="p-3">#</th>
               <th class="p-3">Costureiro</th>
               <th class="p-3 text-right">Produção</th>
-              <th class="p-3 text-right">Eficiência</th>
-              <th class="p-3 text-right">Bonif. Individual</th>
-              <th class="p-3 text-right">Bonif. Geral</th>
-              <th class="p-3 text-right text-brand-600">Bonif. Final</th>
-              <th class="p-3">Status</th>
+              <th class="p-3 text-right">Efic. Geral</th>
+              <th class="p-3 text-right">Efic. Individual</th>
+              <th class="p-3 text-right">$ Geral</th>
+              <th class="p-3 text-right">$ Individual</th>
+              <th class="p-3 text-right text-brand-600">Valor a Receber</th>
             </tr>
           </thead>
           <tbody id="bonificacao-tbody"></tbody>
@@ -1375,49 +1415,50 @@ async function viewBonus() {
   `;
 
   // ─── Render dinâmico da tabela (usado para tempo real) ───
-  function renderTabela(bgSim) {
+  function renderTabela(eficGeralPctSim) {
     const tbody = document.getElementById('bonificacao-tbody');
     const tfoot = document.getElementById('bonificacao-tfoot');
     let somaInd = 0, somaGeral = 0, somaFinal = 0, qtdRecebem = 0;
 
-    tbody.innerHTML = lista.map(c => {
-      const ind = calcularBonificacaoIndividualClient(c.eficiencia);
-      // só recebe geral se tiver bonif individual (= eficiência ≥ 75%)
-      // mas conforme regra: "Bonificação Final = Geral + Individual" — sempre soma
-      // Adotamos: a Bonificação Geral é aplicada quando a Individual é > 0 (paga ao elegível)
-      const elegivel = ind > 0;
-      const geral = elegivel ? Number(bgSim || 0) : 0;
-      const finalVal = (ind > 0 ? ind : 0) + (geral > 0 ? geral : 0);
+    const bgValor = calcularBonificacaoGeralValorClient(eficGeralPctSim);
+
+    tbody.innerHTML = lista.map((c, idx) => {
+      const ind = calcularBonificacaoIndividualClient(c.eficiencia);   // SUMIF(>0)
+      const ger = bgValor;                                              // mesmo valor para todos
+      const finalVal = (ind > 0 ? ind : 0) + (ger > 0 ? ger : 0);
+
       somaInd += ind;
-      somaGeral += geral;
+      somaGeral += ger;
       somaFinal += finalVal;
       if (finalVal > 0) qtdRecebem++;
 
-      const statusClass = finalVal > 0 ? 'badge-alto' : 'badge-baixo';
-      const statusIcon = finalVal > 0 ? 'fa-check' : 'fa-ban';
-      const statusText = finalVal > 0 ? 'Pagar' : 'Sem bonificação';
+      const indClass = ind > 0 ? 'font-semibold text-emerald-600' : 'text-slate-400';
+      const gerClass = ger > 0 ? 'text-amber-600' : 'text-slate-400';
+      const finalClass = finalVal > 0 ? 'text-brand-600' : 'text-slate-400';
+
       return `
         <tr class="t-row border-b border-slate-100 dark:border-slate-800">
+          <td class="p-3 text-slate-500">${idx + 1}</td>
           <td class="p-3 font-semibold cursor-pointer hover:text-brand-600" onclick="openPerfil(${c.costureiro_id})">${c.nome}</td>
           <td class="p-3 text-right">${fmt.num(c.total_producao)}</td>
+          <td class="p-3 text-right text-slate-600 dark:text-slate-400">${fmt.pct(eficGeralPctSim)}</td>
           <td class="p-3 text-right ${c.eficiencia >= 75 ? 'text-emerald-600 font-semibold' : 'text-slate-500'}">${fmt.pct(c.eficiencia)}</td>
-          <td class="p-3 text-right ${ind > 0 ? 'font-semibold text-emerald-600' : 'text-slate-400'}">${fmt.money(ind)}</td>
-          <td class="p-3 text-right ${geral > 0 ? 'text-amber-600' : 'text-slate-400'}">${fmt.money(geral)}</td>
-          <td class="p-3 text-right font-bold text-lg ${finalVal > 0 ? 'text-brand-600' : 'text-slate-400'}">${fmt.money(finalVal)}</td>
-          <td class="p-3"><span class="badge ${statusClass}"><i class="fas ${statusIcon}"></i> ${statusText}</span></td>
+          <td class="p-3 text-right ${gerClass}">${fmt.money(ger)}</td>
+          <td class="p-3 text-right ${indClass}">${fmt.money(ind)}</td>
+          <td class="p-3 text-right font-bold text-lg ${finalClass}">${fmt.money(finalVal)}</td>
         </tr>
       `;
     }).join('');
 
     tfoot.innerHTML = `
       <tr class="bg-slate-100 dark:bg-slate-800/70 font-bold border-t-2 border-slate-300 dark:border-slate-700">
-        <td class="p-3">TOTAL (${qtdRecebem} elegíveis)</td>
+        <td class="p-3" colspan="2">TOTAL (${qtdRecebem} recebem)</td>
         <td class="p-3 text-right">${fmt.num(stats.kpis.total_producao)}</td>
+        <td class="p-3 text-right">${fmt.pct(eficGeralPctSim)}</td>
         <td class="p-3 text-right">${fmt.pct(stats.kpis.eficiencia_media)}</td>
-        <td class="p-3 text-right text-emerald-600">${fmt.money(somaInd)}</td>
         <td class="p-3 text-right text-amber-600">${fmt.money(somaGeral)}</td>
+        <td class="p-3 text-right text-emerald-600">${fmt.money(somaInd)}</td>
         <td class="p-3 text-right text-brand-600 text-lg">${fmt.money(somaFinal)}</td>
-        <td class="p-3"></td>
       </tr>
     `;
 
@@ -1426,73 +1467,85 @@ async function viewBonus() {
     document.getElementById('kpi-total-individual').textContent = fmt.money(somaInd);
     document.getElementById('kpi-total-geral').textContent = fmt.money(somaGeral);
     document.getElementById('kpi-recebem').textContent = qtdRecebem;
-    // Atualiza label do card geral
-    const kpiGeralLabel = document.querySelector('#kpi-total-geral')?.previousElementSibling;
-    if (kpiGeralLabel) kpiGeralLabel.textContent = `Soma Bonificação Geral (× ${qtdRecebem})`;
+
+    // Resultado da simulação
+    const simRes = document.getElementById('sim-bg-result');
+    if (simRes) simRes.textContent = fmt.money(bgValor);
   }
 
   // Render inicial
-  renderTabela(bonificacaoGeral);
+  renderTabela(eficGeralMes);
 
-  // ─── Salvar Bonificação Geral (persiste no banco) ───
+  // ─── Salvar Eficiência Geral do Mês (persiste no banco) ───
   if (canEdit) {
-    document.getElementById('bg-save').addEventListener('click', async () => {
-      const valor = Number(document.getElementById('bg-input').value);
-      const observacao = document.getElementById('bg-obs').value.trim();
-      if (!Number.isFinite(valor) || valor < 0) {
-        toast('Valor deve ser um número positivo', 'error');
+    document.getElementById('eg-save').addEventListener('click', async () => {
+      const eficiencia_pct = Number(document.getElementById('eg-input').value);
+      const observacao = document.getElementById('eg-obs').value.trim();
+      if (!Number.isFinite(eficiencia_pct) || eficiencia_pct < 0 || eficiencia_pct > 200) {
+        toast('Eficiência deve estar entre 0% e 200%', 'error');
         return;
       }
       try {
         await api('/api/bonificacao-geral', {
           method: 'PUT',
-          body: { ano: state.ano, mes: state.mes, valor, observacao }
+          body: { ano: state.ano, mes: state.mes, eficiencia_pct, observacao }
         });
-        toast(`Bonificação Geral salva: ${fmt.money(valor)}`, 'success');
-        // Recarrega tudo
+        toast(`Eficiência Geral salva: ${eficiencia_pct.toFixed(2)}%`, 'success');
         state.stats = null;
         await navigate('bonus');
-      } catch (e) {
-        toast(e.message, 'error');
-      }
+      } catch (e) { toast(e.message, 'error'); }
+    });
+
+    document.getElementById('eg-auto').addEventListener('click', async () => {
+      try {
+        // Reseta para 0 → backend volta a calcular automaticamente
+        await api('/api/bonificacao-geral', {
+          method: 'PUT',
+          body: { ano: state.ano, mes: state.mes, eficiencia_pct: 0 }
+        });
+        toast('Voltou para cálculo automático', 'success');
+        state.stats = null;
+        await navigate('bonus');
+      } catch (e) { toast(e.message, 'error'); }
     });
   }
 
   // ─── Simulação em tempo real (não salva) ───
-  const simInput = document.getElementById('sim-bg');
+  const simInput = document.getElementById('sim-eg');
   simInput.addEventListener('input', () => {
     const v = Number(simInput.value);
     renderTabela(Number.isFinite(v) && v >= 0 ? v : 0);
   });
   document.getElementById('sim-reset').addEventListener('click', () => {
-    simInput.value = bonificacaoGeral.toFixed(2);
-    renderTabela(bonificacaoGeral);
+    simInput.value = eficGeralMes.toFixed(2);
+    renderTabela(eficGeralMes);
   });
 
   // ─── Exportar CSV ───
   document.getElementById('export-csv').addEventListener('click', () => {
-    const bgUsado = Number(simInput.value) || bonificacaoGeral;
-    exportCSVBonus(lista, bgUsado);
+    const eficUsado = Number(simInput.value) || eficGeralMes;
+    exportCSVBonus(lista, eficUsado);
   });
 }
 
 function renderBonus() { /* sem charts */ }
 
-function exportCSVBonus(lista, bonificacaoGeral) {
-  const header = ['Costureiro','Maquina','Producao','Eficiencia(%)','Bonif_Individual','Bonif_Geral','Bonif_Final','Status'];
-  const rows = lista.map(c => {
+function exportCSVBonus(lista, eficienciaGeralPct) {
+  const ger = calcularBonificacaoGeralValorClient(eficienciaGeralPct);
+  const header = ['#','Costureiro','Maquina','Producao','Efic_Geral(%)','Efic_Individual(%)','$_Geral','$_Individual','Valor_a_Receber'];
+  const rows = lista.map((c, idx) => {
     const ind = calcularBonificacaoIndividualClient(c.eficiencia);
-    const geral = ind > 0 ? bonificacaoGeral : 0;
-    const finalVal = ind + geral;
+    const finalVal = (ind > 0 ? ind : 0) + (ger > 0 ? ger : 0);
     return [
+      idx + 1,
       `"${(c.nome || '').replace(/"/g,'""')}"`,
       c.tipo_maquina || '',
       c.total_producao,
-      c.eficiencia.toFixed(2).replace('.', ','),
+      Number(eficienciaGeralPct || 0).toFixed(2).replace('.', ','),
+      Number(c.eficiencia || 0).toFixed(2).replace('.', ','),
+      ger.toFixed(2).replace('.', ','),
       ind.toFixed(2).replace('.', ','),
-      geral.toFixed(2).replace('.', ','),
       finalVal.toFixed(2).replace('.', ','),
-      finalVal > 0 ? 'Pagar' : 'Sem bonificacao'
     ];
   });
   const csv = [header, ...rows].map(r => r.join(';')).join('\n');
@@ -1506,8 +1559,8 @@ function exportCSVBonus(lista, bonificacaoGeral) {
 
 // Compat: outros lugares ainda chamam exportCSV
 function exportCSV(lista) {
-  const bg = state.stats?.bonificacao_geral || 0;
-  exportCSVBonus(lista, bg);
+  const eficGeral = state.stats?.eficiencia_geral_mes ?? 0;
+  exportCSVBonus(lista, eficGeral);
 }
 
 // =====================================================

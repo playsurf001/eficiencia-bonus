@@ -3,7 +3,7 @@ import { cors } from 'hono/cors'
 import { setCookie, deleteCookie } from 'hono/cookie'
 import { renderer } from './renderer'
 import type { Bindings, MetasConfig } from './types'
-import { consolidarEstatisticas, rangeDoMes, type StatsRaw } from './business'
+import { consolidarEstatisticas, calcularComponenteBonificacao, rangeDoMes, type StatsRaw } from './business'
 import {
   createToken, verifyToken, hashPassword, verifyPassword,
   getJwtSecret, getTokenFromRequest, type JwtPayload,
@@ -448,13 +448,37 @@ async function obterStatsRaw(
 }
 
 /**
- * Helper: lê a bonificação geral lançada para um período (ano/mês), ou 0 se nunca foi lançada.
+ * Helper: lê a EFICIÊNCIA GERAL DO MÊS (em %) lançada para o período.
+ *
+ * Replica AG8 da planilha. Pode ser:
+ *  - manual (admin/gestor lançou)  → retornado direto
+ *  - automático: se nunca lançou, calculamos a partir das produções
+ *    como SUM(min_efetivo) / SUM(min_disp) × 100  (idêntico ao Excel)
  */
-async function getBonificacaoGeral(DB: D1Database, empresa_id: number, ano: number, mes: number): Promise<number> {
+async function getEficienciaGeralMes(
+  DB: D1Database,
+  empresa_id: number,
+  ano: number,
+  mes: number,
+  raws?: StatsRaw[]
+): Promise<{ eficiencia_pct: number; manual: boolean }> {
   const row = await DB.prepare(
-    'SELECT valor FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
-  ).bind(empresa_id, ano, mes).first<{ valor: number }>()
-  return row && row.valor > 0 ? Number(row.valor) : 0
+    'SELECT eficiencia_pct FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
+  ).bind(empresa_id, ano, mes).first<{ eficiencia_pct: number | null }>()
+
+  if (row && row.eficiencia_pct != null && Number(row.eficiencia_pct) > 0) {
+    return { eficiencia_pct: Number(row.eficiencia_pct), manual: true }
+  }
+
+  // Cálculo automático a partir dos dados (idêntico à planilha)
+  if (raws && raws.length) {
+    const totalEfet = raws.reduce((s, r) => s + (r.total_minutos_produzidos || 0), 0)
+    const totalDisp = raws.reduce((s, r) => s + (r.total_minutos_trabalhados || 0), 0)
+    if (totalDisp > 0) {
+      return { eficiencia_pct: Number(((totalEfet / totalDisp) * 100).toFixed(2)), manual: false }
+    }
+  }
+  return { eficiencia_pct: 0, manual: false }
 }
 
 app.get('/api/stats', async (c) => {
@@ -465,16 +489,18 @@ app.get('/api/stats', async (c) => {
   const inicio = c.req.query('inicio') || rangeDoMes(ano, mes).inicio
   const fim = c.req.query('fim') || rangeDoMes(ano, mes).fim
 
-  const [config, raws, bonificacaoGeral] = await Promise.all([
+  const [config, raws] = await Promise.all([
     getConfig(c.env.DB, eid),
     obterStatsRaw(c.env.DB, eid, inicio, fim),
-    getBonificacaoGeral(c.env.DB, eid, ano, mes),
   ])
+  const eficGeral = await getEficienciaGeralMes(c.env.DB, eid, ano, mes, raws)
 
-  const costureirosStats = raws.map((r) => consolidarEstatisticas(r, config, bonificacaoGeral))
+  const costureirosStats = raws.map((r) => consolidarEstatisticas(r, config, eficGeral.eficiencia_pct))
   const totalProducao = costureirosStats.reduce((s, x) => s + x.total_producao, 0)
   const totalIndividual = costureirosStats.reduce((s, x) => s + x.bonificacao_individual, 0)
   const totalFinal = costureirosStats.reduce((s, x) => s + x.bonificacao_final, 0)
+  // Bonificação Geral $ (mesmo valor para todos) — é o mesmo de cada costureiro
+  const bonificacaoGeralValor = costureirosStats[0]?.bonificacao_geral || 0
   const eficienciaMedia = costureirosStats.length
     ? costureirosStats.reduce((s, x) => s + x.eficiencia, 0) / costureirosStats.length : 0
   const comBonus = costureirosStats.filter((x) => x.bonificacao_final > 0).length
@@ -482,15 +508,20 @@ app.get('/api/stats', async (c) => {
   return c.json({
     periodo: { inicio, fim, ano, mes },
     config,
-    bonificacao_geral: bonificacaoGeral,
+    eficiencia_geral_mes: eficGeral.eficiencia_pct,
+    eficiencia_geral_manual: eficGeral.manual,
+    bonificacao_geral_valor: bonificacaoGeralValor,
+    // alias antigo p/ compatibilidade do front: passa a refletir a EFICIÊNCIA GERAL EM %
+    bonificacao_geral: eficGeral.eficiencia_pct,
     kpis: {
       total_costureiros: costureirosStats.length,
       total_producao: totalProducao,
       eficiencia_media: Number(eficienciaMedia.toFixed(2)),
-      bonificacao_geral: bonificacaoGeral,
+      eficiencia_geral_mes: eficGeral.eficiencia_pct,
+      bonificacao_geral_valor: bonificacaoGeralValor,
+      bonificacao_geral: bonificacaoGeralValor, // alias
       total_bonificacao_individual: Number(totalIndividual.toFixed(2)),
       total_bonificacao_final: Number(totalFinal.toFixed(2)),
-      // aliases compatíveis
       total_bonus: Number(totalFinal.toFixed(2)),
       costureiros_com_bonus: comBonus,
       alto_desempenho: costureirosStats.filter((x) => x.classe === 'alto').length,
@@ -502,7 +533,15 @@ app.get('/api/stats', async (c) => {
 })
 
 /* =============================================================
- *  API — BONIFICAÇÃO GERAL (manual, mensal)
+ *  API — EFICIÊNCIA GERAL DO MÊS (AG8 da planilha)
+ *
+ *  A planilha tem um campo "Eficiência mês" preenchido manualmente
+ *  pelo administrador. A partir dele a Bonificação Geral $ é calculada
+ *  como (efic - 0,75) × 20 × 50.
+ *
+ *  Se o admin não lançar, calculamos automaticamente:
+ *      efic_mes = SUM(min_efetivos) / SUM(min_disp) × 100
+ *  (idêntico ao Excel)
  * ============================================================= */
 
 // GET por ano/mês
@@ -512,58 +551,97 @@ app.get('/api/bonificacao-geral', async (c) => {
   const ano = Number(c.req.query('ano')) || hoje.getUTCFullYear()
   const mes = Number(c.req.query('mes')) || (hoje.getUTCMonth() + 1)
   const row = await c.env.DB.prepare(
-    'SELECT id, empresa_id, ano, mes, valor, observacao, updated_at FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
+    'SELECT id, empresa_id, ano, mes, valor, eficiencia_pct, observacao, updated_at FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
   ).bind(eid, ano, mes).first<any>()
-  return c.json(row || { empresa_id: eid, ano, mes, valor: 0, observacao: null })
+
+  // Calcula automático se não existir
+  if (!row || row.eficiencia_pct == null || row.eficiencia_pct <= 0) {
+    const { inicio, fim } = rangeDoMes(ano, mes)
+    const raws = await obterStatsRaw(c.env.DB, eid, inicio, fim)
+    const auto = await getEficienciaGeralMes(c.env.DB, eid, ano, mes, raws)
+    return c.json({
+      empresa_id: eid, ano, mes,
+      eficiencia_pct: auto.eficiencia_pct,
+      manual: false,
+      valor: calcularComponenteBonificacao(auto.eficiencia_pct) > 0
+        ? Math.round(calcularComponenteBonificacao(auto.eficiencia_pct) * 100) / 100
+        : 0,
+      observacao: row?.observacao ?? null,
+    })
+  }
+
+  return c.json({
+    ...row,
+    manual: true,
+    valor: calcularComponenteBonificacao(Number(row.eficiencia_pct)) > 0
+      ? Math.round(calcularComponenteBonificacao(Number(row.eficiencia_pct)) * 100) / 100
+      : 0,
+  })
 })
 
 // Histórico
 app.get('/api/bonificacao-geral/historico', async (c) => {
   const eid = await getEmpresaId(c)
   const { results } = await c.env.DB.prepare(
-    'SELECT id, ano, mes, valor, observacao, updated_at FROM bonificacao_geral WHERE empresa_id = ? ORDER BY ano DESC, mes DESC LIMIT 24'
+    'SELECT id, ano, mes, valor, eficiencia_pct, observacao, updated_at FROM bonificacao_geral WHERE empresa_id = ? ORDER BY ano DESC, mes DESC LIMIT 24'
   ).bind(eid).all()
   return c.json(results)
 })
 
 // PUT (upsert) — apenas admin/gestor podem editar
+// Aceita `eficiencia_pct` (preferido, em %, ex.: 78 = 78%) ou `valor` (R$, legado)
 app.put('/api/bonificacao-geral', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
   const u = c.get('user')
-  const body = await c.req.json<{ ano: number; mes: number; valor: number; observacao?: string }>()
+  const body = await c.req.json<{ ano: number; mes: number; eficiencia_pct?: number; valor?: number; observacao?: string }>()
   const ano = Number(body.ano)
   const mes = Number(body.mes)
-  const valor = Number(body.valor)
 
   if (!Number.isFinite(ano) || !Number.isFinite(mes) || mes < 1 || mes > 12) {
     return c.json({ error: 'Período inválido (ano/mês)' }, 400)
   }
-  if (!Number.isFinite(valor) || valor < 0) {
-    return c.json({ error: 'Valor deve ser positivo (≥ 0)' }, 400)
+
+  let eficienciaPct: number
+  if (Number.isFinite(body.eficiencia_pct)) {
+    eficienciaPct = Number(body.eficiencia_pct)
+  } else if (Number.isFinite(body.valor)) {
+    // Compat: converter valor R$ para eficiência. valor = (e/100 - 0,75) × 20 × 50 → e = 100 × (valor/1000 + 0,75)
+    const v = Number(body.valor)
+    eficienciaPct = v > 0 ? 100 * (v / 1000 + 0.75) : 0
+  } else {
+    return c.json({ error: 'Informe eficiencia_pct (em %) ou valor (R$)' }, 400)
   }
 
+  if (!Number.isFinite(eficienciaPct) || eficienciaPct < 0 || eficienciaPct > 200) {
+    return c.json({ error: 'Eficiência deve estar entre 0 e 200%' }, 400)
+  }
+
+  const eficRound = Math.round(eficienciaPct * 100) / 100
+  const valorCalc = calcularComponenteBonificacao(eficRound)
+  const valorCache = valorCalc > 0 ? Math.round(valorCalc * 100) / 100 : 0
   const obs = (body.observacao || '').slice(0, 500) || null
 
   await c.env.DB.prepare(`
-    INSERT INTO bonificacao_geral (empresa_id, ano, mes, valor, observacao, updated_at)
-    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    INSERT INTO bonificacao_geral (empresa_id, ano, mes, valor, eficiencia_pct, observacao, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(empresa_id, ano, mes) DO UPDATE SET
       valor = excluded.valor,
+      eficiencia_pct = excluded.eficiencia_pct,
       observacao = excluded.observacao,
       updated_at = CURRENT_TIMESTAMP
-  `).bind(u.empresa_id, ano, mes, Math.round(valor * 100) / 100, obs).run()
+  `).bind(u.empresa_id, ano, mes, valorCache, eficRound, obs).run()
 
-  // Auditoria
   try {
     await c.env.DB.prepare(
       'INSERT INTO auditoria (empresa_id, usuario_id, acao, entidade, detalhes) VALUES (?, ?, ?, ?, ?)'
-    ).bind(u.empresa_id, u.sub, 'update', 'bonificacao_geral', JSON.stringify({ ano, mes, valor, obs })).run()
+    ).bind(u.empresa_id, u.sub, 'update', 'bonificacao_geral',
+           JSON.stringify({ ano, mes, eficiencia_pct: eficRound, valor: valorCache, obs })).run()
   } catch {}
 
   const row = await c.env.DB.prepare(
-    'SELECT id, empresa_id, ano, mes, valor, observacao, updated_at FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
+    'SELECT id, empresa_id, ano, mes, valor, eficiencia_pct, observacao, updated_at FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
   ).bind(u.empresa_id, ano, mes).first<any>()
 
-  return c.json({ ok: true, bonificacao_geral: row })
+  return c.json({ ok: true, bonificacao_geral: { ...row, manual: true } })
 })
 
 app.get('/api/stats/evolucao', async (c) => {
@@ -606,7 +684,7 @@ app.get('/api/stats/costureiro/:id', async (c) => {
   const mes = Number(c.req.query('mes')) || (hoje.getUTCMonth() + 1)
   const { inicio, fim } = rangeDoMes(ano, mes)
 
-  const [config, raws, serie, bonificacaoGeral] = await Promise.all([
+  const [config, raws, serie] = await Promise.all([
     getConfig(c.env.DB, eid),
     obterStatsRaw(c.env.DB, eid, inicio, fim, id),
     c.env.DB.prepare(`
@@ -621,13 +699,16 @@ app.get('/api/stats/costureiro/:id', async (c) => {
       GROUP BY p.data
       ORDER BY p.data ASC
     `).bind(eid, id, inicio, fim).all<any>(),
-    getBonificacaoGeral(c.env.DB, eid, ano, mes),
   ])
 
   if (raws.length === 0)
     return c.json({ error: 'Costureiro não encontrado' }, 404)
 
-  const stats = consolidarEstatisticas(raws[0], config, bonificacaoGeral)
+  // Eficiência geral do mês (manual ou automática a partir de TODOS os costureiros)
+  const allRaws = await obterStatsRaw(c.env.DB, eid, inicio, fim)
+  const eficGeral = await getEficienciaGeralMes(c.env.DB, eid, ano, mes, allRaws)
+
+  const stats = consolidarEstatisticas(raws[0], config, eficGeral.eficiencia_pct)
   const diario = serie.results.map((r: any) => ({
     data: r.data,
     producao: r.producao || 0,
@@ -643,29 +724,39 @@ app.get('/api/stats/costureiro/:id', async (c) => {
     const hMes = d.getUTCMonth() + 1
     const hAno = d.getUTCFullYear()
     const range = rangeDoMes(hAno, hMes)
-    const [r, bg] = await Promise.all([
-      obterStatsRaw(c.env.DB, eid, range.inicio, range.fim, id),
-      getBonificacaoGeral(c.env.DB, eid, hAno, hMes),
-    ])
-    const s = r.length ? consolidarEstatisticas(r[0], config, bg) : null
+    const rAll = await obterStatsRaw(c.env.DB, eid, range.inicio, range.fim)
+    const rOne = await obterStatsRaw(c.env.DB, eid, range.inicio, range.fim, id)
+    const eg = await getEficienciaGeralMes(c.env.DB, eid, hAno, hMes, rAll)
+    const s = rOne.length ? consolidarEstatisticas(rOne[0], config, eg.eficiencia_pct) : null
     historico.push({
       ano: hAno, mes: hMes,
       label: `${String(hMes).padStart(2, '0')}/${hAno}`,
       eficiencia: s?.eficiencia || 0,
       producao: s?.total_producao || 0,
       bonificacao_individual: s?.bonificacao_individual || 0,
-      bonificacao_geral: bg,
+      bonificacao_geral: s?.bonificacao_geral || 0,
+      eficiencia_geral_mes: eg.eficiencia_pct,
       bonificacao_final: s?.bonificacao_final || 0,
       bonus: s?.bonificacao_final || 0, // compat
     })
   }
 
-  return c.json({ periodo: { inicio, fim, ano, mes }, bonificacao_geral: bonificacaoGeral, stats, diario, historico })
+  return c.json({
+    periodo: { inicio, fim, ano, mes },
+    eficiencia_geral_mes: eficGeral.eficiencia_pct,
+    eficiencia_geral_manual: eficGeral.manual,
+    bonificacao_geral: stats.bonificacao_geral,
+    stats, diario, historico,
+  })
 })
 
 app.post('/api/simulacao', async (c) => {
   const eid = await getEmpresaId(c)
-  const body = await c.req.json<Partial<MetasConfig> & { ano?: number; mes?: number; bonificacao_geral?: number }>()
+  const body = await c.req.json<Partial<MetasConfig> & {
+    ano?: number; mes?: number;
+    eficiencia_geral_pct?: number;   // novo (preferido)
+    bonificacao_geral?: number;      // legado: aceita como % se ≤ 200, senão como R$
+  }>()
   const hoje = new Date()
   const ano = body.ano || hoje.getUTCFullYear()
   const mes = body.mes || (hoje.getUTCMonth() + 1)
@@ -674,25 +765,33 @@ app.post('/api/simulacao', async (c) => {
   const cfgBase = await getConfig(c.env.DB, eid)
   const cfg: MetasConfig = { ...cfgBase, ...body }
 
-  // Permite simular com bonificação geral diferente da real
-  const bonGeralReal = await getBonificacaoGeral(c.env.DB, eid, ano, mes)
-  const bonGeralSim = Number.isFinite(body.bonificacao_geral as number) && (body.bonificacao_geral as number) >= 0
-    ? Number(body.bonificacao_geral)
-    : bonGeralReal
-
   const raws = await obterStatsRaw(c.env.DB, eid, inicio, fim)
-  const costureirosStats = raws.map((r) => consolidarEstatisticas(r, cfg, bonGeralSim))
+  const eficGeralReal = await getEficienciaGeralMes(c.env.DB, eid, ano, mes, raws)
+
+  // Permite simular eficiência geral do mês (em %)
+  let eficGeralSim = eficGeralReal.eficiencia_pct
+  if (Number.isFinite(body.eficiencia_geral_pct as number) && (body.eficiencia_geral_pct as number) >= 0) {
+    eficGeralSim = Number(body.eficiencia_geral_pct)
+  } else if (Number.isFinite(body.bonificacao_geral as number) && (body.bonificacao_geral as number) >= 0) {
+    const v = Number(body.bonificacao_geral)
+    eficGeralSim = v <= 200 ? v : 100 * (v / 1000 + 0.75)  // converte R$ legado em %
+  }
+
+  const costureirosStats = raws.map((r) => consolidarEstatisticas(r, cfg, eficGeralSim))
   const totalIndividual = costureirosStats.reduce((s, x) => s + x.bonificacao_individual, 0)
   const totalFinal = costureirosStats.reduce((s, x) => s + x.bonificacao_final, 0)
+  const bonGeralValor = costureirosStats[0]?.bonificacao_geral || 0
   const comBonus = costureirosStats.filter((x) => x.bonificacao_final > 0).length
 
   return c.json({
     periodo: { inicio, fim, ano, mes },
     config_simulada: cfg,
-    bonificacao_geral: bonGeralSim,
+    eficiencia_geral_mes: eficGeralSim,
+    bonificacao_geral_valor: bonGeralValor,
+    bonificacao_geral: bonGeralValor, // compat
     total_bonificacao_individual: Number(totalIndividual.toFixed(2)),
     total_bonificacao_final: Number(totalFinal.toFixed(2)),
-    total_bonus: Number(totalFinal.toFixed(2)), // compat
+    total_bonus: Number(totalFinal.toFixed(2)),
     costureiros_com_bonus: comBonus,
     costureiros: costureirosStats,
   })
