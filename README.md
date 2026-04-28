@@ -77,6 +77,9 @@ O importador reconhece automaticamente o formato da planilha `BONIFICAÇAO MENSA
 | POST   | `/api/simulacao`               | Simulação "what-if" de cenários de bonificação                 |
 | GET    | `/api/config`                  | Configuração atual (metas, bônus, limites)                     |
 | PUT    | `/api/config`                  | **admin/gestor** atualiza configuração                         |
+| GET    | `/api/bonificacao-geral?ano=2026&mes=10` | Lê bonificação geral lançada para o período         |
+| PUT    | `/api/bonificacao-geral`       | **admin/gestor** lança/atualiza bonificação geral (`{ano,mes,valor,observacao?}`) |
+| GET    | `/api/bonificacao-geral/historico` | Últimos 24 lançamentos da bonificação geral                |
 
 Ex.:
 ```bash
@@ -103,17 +106,28 @@ curl -X POST "https://corepro-eficiencia.pages.dev/api/import/xlsx?dryRun=true" 
 
 Dados em produção: **42 costureiros**, **1.315 lançamentos** (outubro/2026), **15 operações**, **3 usuários demo**, **1 empresa seed**.
 
-## 🧮 Regras de Negócio
-- **Eficiência**: `(tempo_padrao × quantidade) / minutos_trabalhados × 100`
-- **Eficiência ponderada**: `eficiência × grau_dificuldade`
-- **Frequência**: `dias_trabalhados / dias_úteis` — precisa `> 90%`
-- **Qualidade**: total de `retrabalho` no mês deve ser `≤ retrabalho_limite`
-- **Tabela de bonificação** (só paga se frequência ≥ 90% e retrabalho OK):
-  - `< 70%` → R$ 0
-  - `70%–85%` → R$ 100
-  - `85%–100%` → R$ 250
-  - `100%–115%` → R$ 400
-  - `> 115%` → R$ 600
+## 🧮 Regras de Negócio (réplica fiel da aba "Bonificação" da planilha)
+- **Eficiência (geral / individual)**: `(tempo_padrao × quantidade) / minutos_trabalhados × 100`, arredondada a **2 casas decimais** antes de qualquer cálculo (igual ao Excel).
+- **Bonificação Individual** (fórmula central, **sem alterações ou simplificações**):
+  ```
+  Bonificação Individual = eficiência × 20,00 × (100 / 2)
+  ```
+  - `eficiência` = valor decimal (ex.: 0,85 para 85%)
+  - **Só paga se eficiência ≥ 75%**, caso contrário Bonificação Individual = R$ 0
+  - Sem cálculo ponderado, sem peso por operação, sem faixas — **somente eficiência geral/individual**.
+- **Bonificação Geral (R$)**: campo **editável pelo administrador/gestor**, único por mês/empresa.
+  - Aceita apenas valores positivos (≥ 0)
+  - Não é calculado automaticamente — armazenado em `bonificacao_geral` por período
+- **Bonificação Final**:
+  ```
+  Final = Bonificação Geral + Bonificação Individual
+  ```
+  - Soma apenas valores positivos
+  - Se um for 0, mostra apenas o outro
+  - Se ambos forem 0 → 0
+  - **Nunca permite negativo**
+- **Atualização em tempo real**: ao alterar a Bonificação Geral, todos os valores finais são recalculados imediatamente na tela.
+- **Frequência** e **Qualidade**: continuam sendo exibidas como informação, mas **não bloqueiam** o pagamento (regra fiel à planilha).
 
 ## 🚀 Deploy
 
@@ -151,8 +165,9 @@ pm2 start ecosystem.config.cjs
 ## 📌 Status
 - **Plataforma**: Cloudflare Pages
 - **Status**: ✅ Ativo em produção (https://corepro-eficiencia.pages.dev)
-- **Última atualização**: 23/04/2026
-- **Deploy ID**: 47d17129
+- **Última atualização**: 28/04/2026 — réplica fiel da aba "Bonificação" da planilha
+- **Deploy ID**: a31b0686
+- **Validação**: 17 costureiros bonificados em Out/2026 — 0 falhas de arredondamento, total R$ 14.922,60 (idêntico ao Excel)
 
 ## 🛠️ Próximos passos sugeridos
 1. Tornar `/api/stats`, `/api/costureiros` etc. também protegidos (hoje são leitura pública p/ facilitar demo) ativando `authMiddleware` em todas as rotas
