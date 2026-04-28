@@ -58,13 +58,30 @@ export interface EstatisticaCostureiro {
   total_minutos_trabalhados: number;
   total_minutos_produzidos: number;
   eficiencia: number;
-  eficiencia_ponderada: number;
+  eficiencia_ponderada: number; // compat (= eficiencia simples agora)
   dias_trabalhados: number;
   dias_uteis: number;
   frequencia: number;
   retrabalho_total: number;
   qualidade: number;
+  /** Bonificação calculada pela fórmula da planilha (R$) */
+  bonificacao_individual: number;
+  /** Bonificação manual lançada para o período (R$) */
+  bonificacao_geral: number;
+  /** Soma final = geral + individual (R$) */
+  bonificacao_final: number;
+  /** alias de compatibilidade — igual a bonificacao_final */
   bonus: number;
   motivo_bloqueio?: string;
   classe: 'alto' | 'medio' | 'baixo';
+}
+
+export interface BonificacaoGeralPeriodo {
+  id?: number;
+  empresa_id: number;
+  ano: number;
+  mes: number;
+  valor: number;
+  observacao?: string;
+  updated_at?: string;
 }
