@@ -644,6 +644,100 @@ app.put('/api/bonificacao-geral', authMiddleware, requireRole('admin', 'gestor')
   return c.json({ ok: true, bonificacao_geral: { ...row, manual: true } })
 })
 
+// DELETE — Reseta a Eficiência Geral para cálculo automático
+// Remove o registro manual da bonificação geral do mês — backend volta a calcular automaticamente.
+app.delete('/api/bonificacao-geral', authMiddleware, requireRole('admin', 'gestor'), async (c) => {
+  const u = c.get('user')
+  const ano = Number(c.req.query('ano'))
+  const mes = Number(c.req.query('mes'))
+  if (!Number.isFinite(ano) || !Number.isFinite(mes) || mes < 1 || mes > 12) {
+    return c.json({ error: 'Período inválido (ano/mês)' }, 400)
+  }
+  const r = await c.env.DB.prepare(
+    'DELETE FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
+  ).bind(u.empresa_id, ano, mes).run()
+  try {
+    await c.env.DB.prepare(
+      'INSERT INTO auditoria (empresa_id, usuario_id, acao, entidade, detalhes) VALUES (?, ?, ?, ?, ?)'
+    ).bind(u.empresa_id, u.sub, 'reset', 'bonificacao_geral',
+           JSON.stringify({ ano, mes, removidos: r.meta?.changes ?? 0 })).run()
+  } catch {}
+  return c.json({ ok: true, removidos: r.meta?.changes ?? 0, ano, mes })
+})
+
+/* =============================================================
+ *  API — LIMPAR MÊS COMPLETO (admin only)
+ *
+ *  Remove TODOS os dados de um mês específico:
+ *    - producao (registros do mês)
+ *    - bonificacao_geral (eficiência manual do mês)
+ *
+ *  NÃO afeta outros meses, costureiros, operações ou config.
+ *  Operação destrutiva — exige role admin.
+ * ============================================================= */
+app.post('/api/admin/limpar-mes', authMiddleware, requireRole('admin'), async (c) => {
+  const u = c.get('user')
+  const body = await c.req.json<{ ano: number; mes: number; confirmar?: string }>().catch(() => ({} as any))
+  const ano = Number(body.ano)
+  const mes = Number(body.mes)
+
+  if (!Number.isFinite(ano) || !Number.isFinite(mes) || mes < 1 || mes > 12) {
+    return c.json({ error: 'Período inválido (ano/mês)' }, 400)
+  }
+  if (ano < 2000 || ano > 2100) {
+    return c.json({ error: 'Ano fora do intervalo permitido (2000–2100)' }, 400)
+  }
+  // Confirmação textual obrigatória — protege contra cliques acidentais
+  const expected = `LIMPAR ${String(mes).padStart(2, '0')}/${ano}`
+  if ((body.confirmar || '').trim().toUpperCase() !== expected) {
+    return c.json({
+      error: `Confirmação obrigatória. Envie confirmar="${expected}"`,
+      esperado: expected,
+    }, 400)
+  }
+
+  const { inicio, fim } = rangeDoMes(ano, mes)
+
+  // 1) Conta antes (para o log de auditoria e resposta)
+  const cntProd = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM producao WHERE empresa_id = ? AND data BETWEEN ? AND ?'
+  ).bind(u.empresa_id, inicio, fim).first<{ n: number }>()
+
+  const cntBon = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
+  ).bind(u.empresa_id, ano, mes).first<{ n: number }>()
+
+  // 2) Apaga (em sequência — D1 não tem transação multi-statement no batch padrão)
+  const delProd = await c.env.DB.prepare(
+    'DELETE FROM producao WHERE empresa_id = ? AND data BETWEEN ? AND ?'
+  ).bind(u.empresa_id, inicio, fim).run()
+
+  const delBon = await c.env.DB.prepare(
+    'DELETE FROM bonificacao_geral WHERE empresa_id = ? AND ano = ? AND mes = ?'
+  ).bind(u.empresa_id, ano, mes).run()
+
+  // 3) Auditoria
+  try {
+    await c.env.DB.prepare(
+      'INSERT INTO auditoria (empresa_id, usuario_id, acao, entidade, detalhes) VALUES (?, ?, ?, ?, ?)'
+    ).bind(u.empresa_id, u.sub, 'purge_month', 'producao+bonificacao_geral',
+           JSON.stringify({
+             ano, mes, inicio, fim,
+             producao_removida: delProd.meta?.changes ?? 0,
+             bonificacao_removida: delBon.meta?.changes ?? 0,
+           })).run()
+  } catch {}
+
+  return c.json({
+    ok: true,
+    ano, mes,
+    periodo: { inicio, fim },
+    producao_removida: delProd.meta?.changes ?? cntProd?.n ?? 0,
+    bonificacao_removida: delBon.meta?.changes ?? cntBon?.n ?? 0,
+    mensagem: `Dados de ${String(mes).padStart(2, '0')}/${ano} removidos com sucesso.`,
+  })
+})
+
 app.get('/api/stats/evolucao', async (c) => {
   const eid = await getEmpresaId(c)
   const hoje = new Date()

@@ -49,10 +49,17 @@ function toast(msg, type = 'success') {
 }
 
 async function api(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+  // Cache-busting: força fetch novo em GET para evitar dados stale após save/delete
+  if (method === 'GET') {
+    headers['Cache-Control'] = 'no-cache';
+    headers['Pragma'] = 'no-cache';
+  }
   const res = await fetch(path, {
     credentials: 'include',
+    cache: method === 'GET' ? 'no-store' : 'default',
     ...options,
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
@@ -1478,35 +1485,74 @@ async function viewBonus() {
 
   // ─── Salvar Eficiência Geral do Mês (persiste no banco) ───
   if (canEdit) {
-    document.getElementById('eg-save').addEventListener('click', async () => {
-      const eficiencia_pct = Number(document.getElementById('eg-input').value);
-      const observacao = document.getElementById('eg-obs').value.trim();
+    const btnSave = document.getElementById('eg-save');
+    const btnAuto = document.getElementById('eg-auto');
+    const inpEfic = document.getElementById('eg-input');
+    const inpObs = document.getElementById('eg-obs');
+
+    btnSave.addEventListener('click', async () => {
+      const eficiencia_pct = Number(inpEfic.value);
+      const observacao = (inpObs.value || '').trim();
+
+      // Validações de campo obrigatório
+      if (inpEfic.value === '' || inpEfic.value == null) {
+        toast('Informe a Eficiência Geral do mês', 'error');
+        inpEfic.focus(); return;
+      }
       if (!Number.isFinite(eficiencia_pct) || eficiencia_pct < 0 || eficiencia_pct > 200) {
         toast('Eficiência deve estar entre 0% e 200%', 'error');
-        return;
+        inpEfic.focus(); return;
       }
+
+      const original = btnSave.innerHTML;
+      btnSave.disabled = true;
+      btnSave.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Salvando…';
       try {
-        await api('/api/bonificacao-geral', {
+        const resp = await api('/api/bonificacao-geral', {
           method: 'PUT',
           body: { ano: state.ano, mes: state.mes, eficiencia_pct, observacao }
         });
-        toast(`Eficiência Geral salva: ${eficiencia_pct.toFixed(2)}%`, 'success');
+        // Confirma persistência relendo do banco (evita ilusão de save)
+        const verify = await api(`/api/bonificacao-geral?ano=${state.ano}&mes=${state.mes}&_=${Date.now()}`);
+        if (Math.abs(Number(verify.eficiencia_pct) - eficiencia_pct) > 0.01) {
+          throw new Error('Falha ao persistir. Recarregue a página.');
+        }
+        toast(`Dados salvos com sucesso (${eficiencia_pct.toFixed(2)}%)`, 'success');
+        // Força recarregar stats do servidor
         state.stats = null;
+        state.evolucao = null;
         await navigate('bonus');
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) {
+        toast('Erro ao salvar: ' + e.message, 'error');
+      } finally {
+        btnSave.disabled = false;
+        btnSave.innerHTML = original;
+      }
     });
 
-    document.getElementById('eg-auto').addEventListener('click', async () => {
+    btnAuto.addEventListener('click', async () => {
+      // Confirmação obrigatória
+      if (!confirm('Resetar a Eficiência Geral?\n\nO valor manual será removido e o sistema voltará a calcular automaticamente a partir das produções do mês.')) {
+        return;
+      }
+      const original = btnAuto.innerHTML;
+      btnAuto.disabled = true;
+      btnAuto.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
       try {
-        // Reseta para 0 → backend volta a calcular automaticamente
-        await api('/api/bonificacao-geral', {
-          method: 'PUT',
-          body: { ano: state.ano, mes: state.mes, eficiencia_pct: 0 }
+        // DELETE do registro manual → backend retoma cálculo automático
+        await api(`/api/bonificacao-geral?ano=${state.ano}&mes=${state.mes}`, {
+          method: 'DELETE'
         });
-        toast('Voltou para cálculo automático', 'success');
+        toast('Valores resetados — cálculo automático restaurado', 'success');
         state.stats = null;
+        state.evolucao = null;
         await navigate('bonus');
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) {
+        toast('Erro ao resetar: ' + e.message, 'error');
+      } finally {
+        btnAuto.disabled = false;
+        btnAuto.innerHTML = original;
+      }
     });
   }
 
@@ -1568,20 +1614,26 @@ function exportCSV(lista) {
 // =====================================================
 async function viewProducao() {
   const [producoes, costureiros, operacoes] = await Promise.all([
-    api(`/api/producao?inicio=${state.ano}-${String(state.mes).padStart(2,'0')}-01&fim=${state.ano}-${String(state.mes).padStart(2,'0')}-31`),
+    api(`/api/producao?inicio=${state.ano}-${String(state.mes).padStart(2,'0')}-01&fim=${state.ano}-${String(state.mes).padStart(2,'0')}-31&_=${Date.now()}`),
     api('/api/costureiros'),
     api('/api/operacoes'),
   ]);
   state.costureiros = costureiros; state.operacoes = operacoes;
+
+  const isAdmin = state.user && state.user.role === 'admin';
+  const mesLabel = `${MESES[state.mes-1]}/${state.ano}`;
 
   document.getElementById('view').innerHTML = `
     <div class="card">
       <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
           <h3 class="font-bold text-lg">Registros de Produção</h3>
-          <p class="text-sm text-slate-500">${producoes.length} registros no período</p>
+          <p class="text-sm text-slate-500">${producoes.length} registros em ${mesLabel}</p>
         </div>
-        <button id="new-prod" class="btn btn-primary"><i class="fas fa-plus"></i> Novo Registro</button>
+        <div class="flex gap-2 flex-wrap">
+          <button id="new-prod" class="btn btn-primary"><i class="fas fa-plus"></i> Novo Registro</button>
+          ${isAdmin ? `<button id="clean-month" class="btn btn-danger" title="Remove TODOS os dados deste mês (irreversível)"><i class="fas fa-broom"></i> Limpar ${mesLabel}</button>` : ''}
+        </div>
       </div>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -1617,15 +1669,61 @@ async function viewProducao() {
   `;
 
   document.getElementById('new-prod').addEventListener('click', () => openProdModal());
+
+  // ── Limpar mês completo (admin only) ──
+  const btnClean = document.getElementById('clean-month');
+  if (btnClean) {
+    btnClean.addEventListener('click', async () => {
+      const mesNum = String(state.mes).padStart(2, '0');
+      const expected = `LIMPAR ${mesNum}/${state.ano}`;
+      const aviso = `⚠ ATENÇÃO — Operação irreversível\n\n` +
+        `Você está prestes a remover TODOS os dados de ${MESES[state.mes-1]}/${state.ano}:\n\n` +
+        `  • Registros de produção\n` +
+        `  • Eficiência Geral manual / bonificação do mês\n\n` +
+        `Outros meses NÃO serão afetados.\n` +
+        `Costureiros, operações e configurações NÃO serão afetados.\n\n` +
+        `Para confirmar, digite exatamente:\n${expected}`;
+      const txt = prompt(aviso, '');
+      if (txt == null) return;
+      if (txt.trim().toUpperCase() !== expected) {
+        toast('Confirmação não confere — operação cancelada', 'error');
+        return;
+      }
+      const original = btnClean.innerHTML;
+      btnClean.disabled = true;
+      btnClean.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Limpando…';
+      try {
+        const resp = await api('/api/admin/limpar-mes', {
+          method: 'POST',
+          body: { ano: state.ano, mes: state.mes, confirmar: expected }
+        });
+        toast(`✔ ${resp.producao_removida} produções e ${resp.bonificacao_removida} bonificação removidas`, 'success');
+        // Invalida tudo e recarrega
+        state.stats = null;
+        state.evolucao = null;
+        await navigate('producao');
+      } catch (e) {
+        toast('Erro ao limpar: ' + e.message, 'error');
+      } finally {
+        btnClean.disabled = false;
+        btnClean.innerHTML = original;
+      }
+    });
+  }
 }
 
 window.editProd = (p) => openProdModal(p);
 window.deleteProd = async (id) => {
-  if (!confirm('Excluir este registro?')) return;
-  await api(`/api/producao/${id}`, { method: 'DELETE' });
-  toast('Registro excluído', 'success');
-  state.stats = null;
-  await navigate('producao');
+  if (!confirm('Excluir este registro de produção?\n\nEsta operação não pode ser desfeita.')) return;
+  try {
+    await api(`/api/producao/${id}`, { method: 'DELETE' });
+    toast('Registro excluído com sucesso', 'success');
+    state.stats = null;
+    state.evolucao = null;
+    await navigate('producao');
+  } catch (e) {
+    toast('Erro ao excluir: ' + e.message, 'error');
+  }
 };
 
 function openProdModal(prod = null) {
@@ -1752,11 +1850,16 @@ async function viewCostureiros() {
 
 window.editCost = (c) => openCostModal(c);
 window.deleteCost = async (id) => {
-  if (!confirm('Desativar este costureiro? (soft delete — histórico preservado)')) return;
-  await api(`/api/costureiros/${id}`, { method: 'DELETE' });
-  toast('Costureiro desativado', 'success');
-  state.stats = null;
-  await navigate('costureiros');
+  if (!confirm('Desativar este costureiro?\n\n(Soft delete — o histórico de produção é preservado e o costureiro deixa de aparecer nos relatórios.)')) return;
+  try {
+    await api(`/api/costureiros/${id}`, { method: 'DELETE' });
+    toast('Costureiro desativado com sucesso', 'success');
+    state.stats = null;
+    state.evolucao = null;
+    await navigate('costureiros');
+  } catch (e) {
+    toast('Erro ao desativar: ' + e.message, 'error');
+  }
 };
 
 function openCostModal(cost = null) {
@@ -1858,10 +1961,15 @@ async function viewOperacoes() {
 
 window.editOp = (o) => openOpModal(o);
 window.deleteOp = async (id) => {
-  if (!confirm('Desativar esta operação?')) return;
-  await api(`/api/operacoes/${id}`, { method: 'DELETE' });
-  toast('Operação desativada', 'success');
-  await navigate('operacoes');
+  if (!confirm('Desativar esta operação?\n\n(Soft delete — registros de produção existentes são preservados.)')) return;
+  try {
+    await api(`/api/operacoes/${id}`, { method: 'DELETE' });
+    toast('Operação desativada com sucesso', 'success');
+    state.stats = null;
+    await navigate('operacoes');
+  } catch (e) {
+    toast('Erro ao desativar: ' + e.message, 'error');
+  }
 };
 
 function openOpModal(op = null) {
